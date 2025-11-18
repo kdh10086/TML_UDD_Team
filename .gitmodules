@@ -5,3 +5,7 @@
 [submodule "external/Transformer-MM-Explainability"]
 	path = external/Transformer-MM-Explainability
 	url = https://github.com/hila-chefer/Transformer-MM-Explainability.git
+
+[submodule "checkpoints/simlingo"]
+	path = checkpoints/simlingo
+	url = https://huggingface.co/RenzKa/simlingo
