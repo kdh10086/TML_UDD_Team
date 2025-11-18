@@ -1,0 +1,7 @@
+[submodule "external/simlingo"]
+	path = external/simlingo
+	url = https://github.com/RenzKa/simlingo.git
+
+[submodule "external/Transformer-MM-Explainability"]
+	path = external/Transformer-MM-Explainability
+	url = https://github.com/hila-chefer/Transformer-MM-Explainability.git
