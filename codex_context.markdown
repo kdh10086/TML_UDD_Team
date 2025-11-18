@@ -1,0 +1,425 @@
+# codex_context.markdown
+
+이 파일은 Git 레포지토리 내에서 코드 어시스턴트(Codex 등)에게 제공할 **프로젝트 맥락 / 구현 규칙 / 작업 계획**을 정리한 문서입니다.  
+코드를 작성하거나 리팩터링할 때, 이 문서의 내용을 항상 전제로 삼아야 합니다.
+
+---
+
+## 0. 프로젝트 개요 (요약)
+
+- 우리는 **Sim-Lingo InternVL2 기반 VLA 모델**을 **추가 파인튜닝 없이(pretrained 그대로)** 사용합니다.
+- 목표는 **정책 텍스트가 아니라 실제 액션/경로(trajectory)를 기준으로** 한 **action-to-vision 설명**을 만드는 것입니다.
+- 파이프라인 핵심 아이디어:
+  1. Sim-Lingo의 **액션 헤드 출력 → 20×2(or 10×2) 경로 좌표**로 디코딩
+  2. 경로 좌표에서 **운동학적 함수(곡률, 가속도, jerk, 위험도 등)** 를 정의하여 **스칼라 \(y_t\)** 로 요약
+  3. 이 \(y_t\)를 Chefer의 **Transformer-MM-Explainablity 메소드** 방식에서의 target output으로 사용
+  4. Transformer 내부 attention 구조를 따라 relevance를 역전파하여
+  5. 최종적으로 **“이번에 생성된 실제 경로(행동)에 인과적으로 기여한 시각 패치/영역”** 를 나타내는 히트맵을 얻음
+  6. 위 과정을 횡방향 제어 행렬 p,  종방향 제어 행렬 w에 각각 적용하여 각각의 히트맵을 얻음.
+- 비교군으로는
+  - **텍스트 토큰 기반 Transformer-MM-Explainablity 메소드**
+  - **Chefer의 Transformer Attribution (텍스트 토큰 기반)**
+  - **ViT Attention / Attention Rollout (ViT 내 시각화)**
+  를 구현합니다.
+  이때, 텍스트 토큰 기반 메소드들은 output 텍스트 중 동사 단어의 토큰의 가장 값이 큰 logit을 y_t로 사용한다.
+  그리고 ViT 내 시각화 메소드들은, ViT 시각 인코더 내에서만 훅을 걸어서 동작하도록 한다. (시각->시각)
+- 최종 목표:
+  - **원터치(one-touch)** 실행으로 모든 장면·모든 메소드의 히트맵을 자동 생성
+  - 이후 기말고사 이후에 정량 평가에 사용할 수 있는 히트맵 결과를 확보
+
+---
+
+## 1. 실험 계획 (Experiment Plan)
+
+1.  기말 전까지 우선 목표:
+   - 각 메소드별 히트맵 결과 이미지들을 **자동으로 생성/모으는 코드**를 완성
+   - 단일 실행으로,
+     - Sim-Lingo 추론 수행
+     - 5개 설명 메소드 모두 실행
+     - 모든 Scene 구간에 대해 히트맵 결과를 디렉토리에 정리해 저장
+   - 즉 **“실행 버튼 한 번 → 전 메소드 히트맵 결과 생성”** 구조를 만든다.
+
+---
+
+## 2. 실험 구현 단계 (a–f)
+
+### a. Scene 구간 5개 찾기 (Phase 1, 최우선)
+
+- 시나리오를 여러 번 돌려보면서 **실험에 사용할 “Scene 구간” 5개**를 선정한다.
+- 각 Scene 구간은:
+  - **히트맵이 시각적으로 의미 있고 아름답게** 나와야 한다.
+  - **사고 직전 일반 상태**가 잠깐 포함되어야 한다.
+  - **사고 과정 전체**가 포함되어야 한다.
+  - **사고 이후 차량 정지(혹은 이에 준하는 상태 종료)** 가 포함되어야 한다.
+  - 길이는 가변적이어도 된다. (이미지 개수 N은 Scene마다 달라도 괜찮음)
+- Scene 1~5 각각에 대해:
+  - 어떤 기준으로 프레임을 자를지(초 단위 / 이벤트 단위 등)를 정리
+  - 이미지 파일명 규칙 예:
+    - `data/scene01/scene01_0001.png`
+    - …
+  - 디렉토리 구조 예:
+    - `data/scene01/*.png`
+    - `data/scene02/*.png`
+  - 각 Scene의 전개를 **간단한 텍스트 설명**으로 기록
+- 이 구조가 이후 b, c, d, e에서 **그대로 재사용되는 데이터 I/F 규약**이므로 중요하다.
+
+---
+
+### b. Sim-Lingo 추론 베이스라인 코드 (Phase 1, 최우선)
+
+- **Sim-Lingo 추론 전용 베이스라인 코드**를 만든다.
+- 특징:
+  - “진짜 추론만 하는 코드”
+  - 모든 설명 메소드는 **반드시 이 코드만 사용**하여 추론 결과(토큰, trajectory, attention 등)를 가져온다.
+- 입력:
+  - `scene_dir: str` — Scene 이미지들이 들어있는 디렉토리 경로 (N개)
+- 출력(예시 딕셔너리 구조, 필요에 따라 확장 가능):
+
+  - `"images"`: 원본 이미지를 텐서/리스트 형태로
+  - `"vision_tokens"`: ViT patch 토큰
+  - `"text_tokens"`: 텍스트/정책 토큰 (필요 시)
+  - `"action_tokens"`: 액션 헤드 토큰
+  - `"trajectory"`: 디코딩된 경로, 예: `(N, T, 2)` (T=20 or 10)
+  - `"attention_maps"`: 각 레이어/헤드의 self-attention (필요 시)
+
+- 이 모듈은 **전 메소드의 공통 기반**이므로, 모델 로딩/전처리/후처리를 중복 구현하지 않도록 한다.
+- Sim-Lingo에서 요구하는 입력 해상도에 맞게 **이미지 크롭/리사이즈**도 이 단계에서 처리한다. (Scene 선정 후 적용)
+
+---
+
+### c. Generic Attention 논문 방식 조상(ancestor) 베이스라인 (2개 메소드)
+
+- Chefer의 **Generic Attention Explainability** 방식을 기반으로 한 조상 메소드를 구현한다.
+- 이 조상 코드를 토대로:
+
+  1. **Ours (action-based \(y_t\))**
+  2. **텍스트 토큰 기반 \(y_t\)**
+
+  두 메소드를 파생시킨다.
+
+#### c-1. Generic Attention 조상 코드에 필요한 변경
+
+Generic Attention 논문 코드(공개 구현 등)를 가져와 분석 후 다음을 수행한다.
+
+1. **히트맵 이미지 생성 로직 추가**
+   - 마지막 단계에서 relevance map을 이미지 히트맵으로 변환하고,
+   - 결과 디렉토리에 PNG 등으로 저장하는 기능을 추가한다.
+2. **입력 이미지 개수 N개에 대한 반복 처리**
+   - 입력 `scene_dir`의 이미지 N개 모두에 대해 relevance를 계산하여
+   - N개의 히트맵 이미지를 저장한다.
+3. **\(y_t\) 정의 부분 모듈화**
+   - Generic Attention 내부에서 사용하는 target scalar \(y_t\)를
+     - 함수/콜백 형태로 외부에서 주입할 수 있도록 모듈화한다.
+   - 예: `target_fn(outputs, internal_states) -> scalar y_t`
+   - 이 target_fn을 바꿔 끼움으로써 Ours / 텍스트 방식 메소드를 분기한다.
+
+#### c-2. 고정된 입출력 규칙
+
+모든 메소드에서 통일해야 하는 규칙:
+
+- **입력(Input)**  
+  - `scene_dir: str` — 장면 구간 이미지들이 들어있는 디렉토리 경로 (N개)
+- **출력(Output)**  
+  - 히트맵 이미지들이 들어있는 **결과 디렉토리 생성 (N개)**  
+  - `output_dir: str` — 필요한 경우 자동 생성
+
+메소드 시그니처 예시:
+
+- `generate_heatmaps_generic_ours(scene_dir: str, output_dir: str, ...) -> None`
+- `generate_heatmaps_generic_text(scene_dir: str, output_dir: str, ...) -> None`
+
+#### c-3. 두 메소드
+
+1. **Ours (action-based \(y_t\))**
+   - Sim-Lingo 액션 토큰 → 경로(trajectory) \(p\) 또는 \(w\) → 운동학 스칼라 함수 → \(y_t\)
+   - 운동학 스칼라 함수는 **플러그인 방식**으로 붙였다 뗐다 가능해야 한다.
+     - 여러 후보 함수(아래 “운동함수 후보” 참조)를 빠르게 교체하며 실험 가능해야 함.
+
+2. **텍스트 토큰 기반 Generic Attention**
+   - 기존 연구들과 동일하게 텍스트/정책 토큰 기반의 \(y_t\) 정의
+   - 예: 특정 텍스트 토큰의 로짓이나 score 등을 스칼라 target으로 사용
+   - 나머지 파이프라인은 Ours와 동일 (동일 입출력 규약)
+
+---
+
+### d. Transformer Attribution 논문 방식 베이스라인 (1개 메소드)
+
+- **Transformer Attribution** (예: “Transformer Interpretability Beyond Attention Visualization”) 방식을 사용한 텍스트 토큰 기반 메소드 1개를 구현한다.
+
+- 입출력 규칙은 동일:
+
+  - 입력: `scene_dir` (N개 이미지)
+  - 출력: 히트맵 이미지들이 들어 있는 결과 디렉토리 생성 (N개)
+
+- 메소드 예시 시그니처:
+  - `generate_heatmaps_transformer_attr(scene_dir: str, output_dir: str, ...) -> None`
+
+---
+
+### e. ViT Attention / Attention Rollout (2개 메소드)
+
+- ViT 내부에서만 동작하는 시각화 메소드 2개를 구현한다.
+
+1. **Raw Attention 방식**
+   - ViT의 self-attention map을 직접 이용한 시각화
+   - 마지막 레이어(혹은 여러 레이어 평균)의 CLS→patch attention을 사용해 이미지 히트맵 생성
+
+2. **Attention Rollout 방식**
+   - 여러 레이어의 attention을 roll-out (연속 곱)하여 CLS→patch 글로벌 relevance를 구한 후 히트맵 생성
+
+- 두 메소드 모두에서 동일 입출력 규칙 사용:
+
+  - 입력: `scene_dir` (N개 이미지)
+  - 출력: 결과 디렉토리(각 N개 히트맵) 생성
+
+- 예시 시그니처:
+  - `generate_heatmaps_vit_attention(scene_dir: str, output_dir: str, ...) -> None`
+  - `generate_heatmaps_vit_rollout(scene_dir: str, output_dir: str, ...) -> None`
+
+---
+
+### f. 통합 실행 코드 (Phase 3, 우선순위 가장 뒤)
+
+- 최종적으로 **5개의 출력 메소드를 한 번에 호출**하여,
+  - 모든 Scene 디렉토리에 대해 반복 실행하는 통합 스크립트를 작성한다.
+
+- 예시 스크립트:
+  - `run_all_methods.py`
+
+- 기능:
+  - 인자:
+    - `--scenes_root`: `data/` 처럼 scene01~scene05가 들어있는 루트 디렉토리
+    - `--output_root`: `results/` 루트
+  - 내부 동작:
+    - `data/scene01`, `data/scene02`, … 순회
+    - 각 Scene에 대해:
+      - 5개 메소드의 `generate_heatmaps_*` 호출
+      - 결과는 예를 들어 다음과 같이 저장:
+        - `results/generic_ours/scene01/`
+        - `results/generic_text/scene01/`
+        - `results/transformer_attr/scene01/`
+        - `results/vit_attention/scene01/`
+        - `results/vit_rollout/scene01/`
+
+---
+
+## 3. 운동학 스칼라 함수 후보 (Longitudinal / Lateral)
+
+### 3.1 종방향(롱기튜드) 제어 \(w \in \mathbb{R}^{10 \times 2}\) — 2.5초, Δt = 0.25s
+
+- 설정:
+  - \( w_t \in \mathbb{R}^2, \ t = 0, \dots, 9 \): 시간 t에서의 위치
+  - 시간 간격: \( \Delta t = 0.25 \,s \)
+  - 위치 변화:
+    - \( \Delta w_t = w_t - w_{t-1}, \ t = 1, \dots, 9 \)
+
+#### (1) 종방향 방향축 정의
+
+- 첫 step의 진행 방향을 종방향 축으로 정의:
+
+  - \( e_\text{long} = \frac{\Delta w_1}{\|\Delta w_1\|_2 + \varepsilon} \)
+
+#### (2) 속도, 가속도, jerk
+
+- 종방향 속도:
+  - \( v_t = \frac{\Delta w_t \cdot e_\text{long}}{\Delta t}, \ t = 1, \dots, 9 \)
+- 종방향 가속도:
+  - \( a_t = \frac{v_t - v_{t-1}}{\Delta t}, \ t = 2, \dots, 9 \)
+- 종방향 jerk:
+  - \( j_t = \frac{a_t - a_{t-1}}{\Delta t}, \ t = 3, \dots, 9 \)
+
+#### 종방향 스칼라 후보들
+
+1. **평균 전진 속도**
+
+   - \( g_\text{speed}(w) = \frac{1}{9} \sum_{t=1}^{9} \text{ReLU}(v_t) \)
+   - 전진 정도(후진은 무시)에 대한 지표
+
+2. **누적 전진 거리**
+
+   - \( g_\text{progress}(w) = \sum_{t=1}^{9} \text{ReLU}(\Delta w_t \cdot e_\text{long}) \)
+   - 2.5초 동안의 전진량
+
+3. **가속도 에너지 (동적 강도 / comfort 저하)**
+
+   - \( g_\text{acc-energy}(w) = \sum_{t=2}^{9} a_t^2 \)
+   - 가속/감속의 크기를 제곱합한 값
+
+4. **제동(감속) 에너지 (braking risk)**
+
+   - \( g_\text{brake}(w) = \sum_{t=2}^{9} \text{ReLU}(-a_t)^2 \)
+   - 감속(음의 가속도) 구간만 보는 제동 강도 지표
+
+5. **jerk 기반 승차감/부드러움**
+
+   - \( g_\text{jerk}(w) = \sum_{t=3}^{9} j_t^2 \)
+   - acceleration의 변화량 제곱합 → 승차감/부드러움과 관련
+
+> 종방향에서:
+> - 전진/정지/저속에 관심 → \( g_\text{speed} \) 또는 \( g_\text{progress} \)
+> - 제동/급제동 위험 → \( g_\text{brake} \)
+> - 승차감/부드러운 주행 → \( g_\text{jerk}, g_\text{acc-energy} \)
+> 를 각각 별도의 \(y_t\) 로 정의해 Generic Attention을 실행할 수 있다.
+
+---
+
+### 3.2 횡방향 제어 \(p \in \mathbb{R}^{20 \times 2}\) — 거리 기반 path
+
+- 설정:
+  - \( p_i \in \mathbb{R}^2, \ i=0,\dots,19 \) : path 상의 점
+  - 샘플 간 거리 간격: \( \Delta s \approx 1m \) 정도로 가정
+
+#### (0) 국소 방향 / 곡률 정의
+
+1. 국소 tangent 벡터:
+   - \( \Delta p_i = p_i - p_{i-1}, \ i=1,\dots,19 \)
+   - \( t_i = \frac{\Delta p_i}{\|\Delta p_i\|_2 + \varepsilon} \)
+2. heading 각도:
+   - \( \theta_i = \text{atan2}(t_i^y, t_i^x) \)
+3. 이산 곡률 근사:
+   - \( \kappa_i = \frac{\theta_i - \theta_{i-1}}{\Delta s}, \ i=2,\dots,19 \)
+
+#### 횡방향 스칼라 후보들
+
+1. **곡률 에너지 — 조향 강도(steering magnitude)**
+
+   - \( g_\text{curv}(p) = \sum_{i=2}^{19} \kappa_i^2 \)
+   - 크게/자주 꺾이는 궤적일수록 값이 커짐
+
+2. **곡률 변화량 — 조향 부드러움 / 횡방향 jerk**
+
+   - \( g_\text{curv-diff}(p) = \sum_{i=3}^{19} (\kappa_i - \kappa_{i-1})^2 \)
+   - 조향을 급하게 바꾸는 정도
+
+3. **차선 유지 / lateral deviation (reference 경로가 있을 때)**
+
+   - 기준 경로 \( r_i \), 기준 heading \( \theta_i^\text{ref} \) 가 있을 때,
+   - 횡방향 단위벡터:
+     - \( e_{\text{lat},i} = (-\sin \theta_i^\text{ref}, \cos \theta_i^\text{ref}) \)
+   - 횡방향 오프셋:
+     - \( d_i = (p_i - r_i) \cdot e_{\text{lat},i} \)
+   - 차선 유지 지표:
+     - \( g_\text{lat-dev}(p) = \sum_{i=0}^{19} d_i^2 \)
+   - lane-change에 특화시키려면:
+     - \( g_\text{lane-change}(p) = \sum_{i=15}^{19} d_i^2 \) 등
+
+4. **횡방향 안전 여유 (장애물이 있을 때)**
+
+   - 각 점에서 장애물/경계까지의 횡방향 거리 \( b_{i,k} \) 가 주어졌다고 가정
+   - soft-min lateral margin:
+     - \( m_i = -\frac{1}{\alpha} \log \sum_k \exp(-\alpha b_{i,k}) \)
+   - 전체 lateral risk:
+     - \( g_\text{lat-risk}(p) = \sum_i \text{ReLU}(m_\text{th} - m_i)^2 \)
+       - \( m_\text{th} \): 안전 여유 임계값 (예: 0.5m)
+
+> 횡방향에서:
+> - 조향 강도 → \( g_\text{curv} \)
+> - 조향 부드러움/jerk → \( g_\text{curv-diff} \)
+> - 차선 유지/이탈 → \( g_\text{lat-dev}, g_\text{lane-change} \)
+> - 횡방향 안전 여유 → \( g_\text{lat-risk} \)
+> 등을 각각 별도의 \(y_t\) 로 두고 Generic Attention을 수행할 수 있다.
+
+---
+
+## 4. 작업 우선순위 및 역할 분담
+
+### 4.1 Phase 1 – 최우선
+
+1. **a. 장면 구간 5개 선정**
+2. **b. Sim-Lingo 추론 베이스라인 코드 구현**
+
+- a와 b는 서로 독립적이지만, 둘 다 이후 실험의 기반이므로 **동급 최우선**으로 본다.
+- Scene이 고정되지 않으면 c–e 메소드의 성능/설명 차이를 공정하게 비교하기 어렵다.
+- Sim-Lingo 추론 베이스라인이 없으면 어떤 설명 메소드도 실제로 동작할 수 없다.
+- Sim-Lingo 입력 해상도에 맞는 크롭/리사이즈는 **Scene 선정 이후** 적용한다.
+
+**일정 전략:**
+
+- Phase 1에서 **a와 b를 최대한 병렬로 진행**
+- a와 b가 모두 “동작 가능한 상태”가 되어야
+  - c–e 메소드들을 안정적으로 개발/테스트할 수 있다.
+
+---
+
+### 4.2 역할 분담 (현재 기준)
+
+> 이름은 예시이며, 실제 담당자는 팀 내에서 조정 가능.
+
+#### 담당자 A – 장면 구간 5개 선정(a) + 데이터 구조 정의 (담당자 : 동현)
+
+- 시나리오를 여러 번 돌려보고, 대표성이 좋고 난이도가 있는 Scene 5개 선정
+- 위에서 정의한 Scene 조건(사고 전/중/후, 히트맵 시각적으로 의미 있게)을 만족하도록 선택
+- 각 Scene에 대해:
+  - 프레임 자르는 기준 (시간/이벤트)
+  - 파일명 규칙, 디렉토리 구조
+  - 간단한 텍스트 설명
+  를 문서화
+- 이로써 **데이터 I/F 규약**을 확정
+
+#### 담당자 B – Sim-Lingo 추론 베이스라인(b) 리드 (담당자 : 도형)
+
+- Sim-Lingo 모델 로딩, 전처리/후처리, forward pass 구현
+- Scene 디렉토리를 입력으로 받아:
+  - 이미지 로딩 → 리사이즈/크롭 → Sim-Lingo forward
+  - 필요한 토큰/trajectory/attention 등을 일관된 포맷으로 반환
+- 간단한 API 정의 예:
+  - `run_inference(scene_dir) -> {images, vision_tokens, text_tokens, action_tokens, trajectory, ...}`
+
+#### 담당자 C – 논문 코드/메소드 구조 사전 분석 (Phase 2 준비) (담당자 : 재혁)
+
+- Generic Attention, Transformer Attribution, ViT Attention 관련 논문과 공개 코드 읽기
+  - 코드 구조, 입력 형태, 레이어/토큰 접근 방식 정리
+- 레포지토리에 사전 스켈레톤 생성:
+  - `methods/generic_attention.py`
+  - `methods/transformer_attribution.py`
+  - `methods/vit_attention.py`
+- 함수 시그니처만 먼저 정의해 두어, Phase 1 종료 후 구현을 바로 시작 가능하게 준비
+
+## 참고 논문 링크 (arXiv)
+
+- SimLingo: Vision-Only Closed-Loop Autonomous Driving with Language-Action Alignment  
+  - https://arxiv.org/abs/2503.09594
+
+- Generic Attention-Model Explainability for Interpreting Bi-Modal and Encoder-Decoder Transformers  
+  - https://arxiv.org/abs/2103.15679
+
+- Transformer Interpretability Beyond Attention Visualization  
+  - https://arxiv.org/abs/2012.09838
+
+- Quantifying Attention Flow in Transformers (Attention Rollout / Attention Flow)  
+  - https://arxiv.org/abs/2005.00928
+
+- “Raw Attention”은 독립 논문 제목이 아니라, 위 논문들에서 gradient/rollout을 쓰지 않은 attention weight 자체를 가리키는 비교 기준 용어로 사용됨.
+
+---
+
+### 4.3 Phase 2 이후 요약
+
+Phase 1이 완료되었다고 가정하면:
+
+- **담당자 B + C**
+  - Generic Attention 기반 Ours + 텍스트 방식 2개 메소드 (c) 구현
+  - 공통 규약:
+    - feed-forward 방향에서 각 헤드별 attention map 추출 방식을 통일
+    - grid 단위 → 원본 이미지 픽셀로 히트맵 투영 시 interpolation 방식 통일
+  - B, C가 실제 코딩 담당
+  - A는 코드 리뷰 및 두 메소드 간 **일관성 유지**(설계/인터페이스 관점) 담당
+- **담당자 A + B + C**
+  - Transformer Attribution 1개(d), ViT Attention 2개(e) 구현과 통합 실행(f) 마무리를 공동으로 진행
+
+---
+
+## 5. 핵심 정리 (Codex가 특히 기억해야 할 것)
+
+1. **우리는 “policy-to-vision”이 아니라 “action-to-vision” 설명을 목표로 한다.**
+   - input 이미지 -> simlingo 추론 -> Sim-Lingo 액션 토큰 → trajectory → kinematic scalar \(y_t\) → Transformer-MM-Explainability → vision relevance map → heatmap
+2. 모든 설명 메소드는 **동일한 입출력 규약**을 가진다.
+   - 입력: `scene_dir` (이미지 디렉토리)
+   - 출력: `output_dir` (히트맵 디렉토리)
+3. Sim-Lingo 추론 로직은 **한 곳(run_inference 등)에만 구현**하고, 모든 메소드는 이 모듈을 통해 토큰/trajectory를 가져온다.
+4. 운동학 함수(종방향/횡방향)는 **플러그인/모듈형 구조**로 구현하여 다양한 \(y_t\)를 빠르게 바꿔가며 실험할 수 있어야 한다.
+5. 최종적으로 `run_all_methods.py` 같은 스크립트에서 **원터치 실행**으로 5개 메소드의 히트맵을 모두 생성할 수 있도록 해야 한다.
+
+이 파일의 내용은 **코드 어시스턴트에게 주입되는 상시 컨텍스트**로 사용되며,  
+레포지토리 내 모든 구현은 이 맥락과 규약을 따르는 것을 기본 전제로 한다.
+
