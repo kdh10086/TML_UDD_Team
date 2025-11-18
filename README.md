@@ -70,8 +70,10 @@ payload = {
 
 - `meta`: `original_height/width`, `num_total_image_tokens`, `frames` 등 설명 기법이 필요로 하는 정보를 담고 있습니다.
 - `target_info`: action 모드이면 `{"type": "action", "kinematic_metric": "curv_energy", "head": "route"}` 식으로 남으며, text 모드이면 특정 토큰 인덱스/문자열이 기록됩니다.
-- `text_outputs`는 text 모드에서만 채워지며, action 모드에서는 `None`입니다.
+- `text_outputs`는 기본적으로 모든 모드에서 생성 토큰 정보를 저장합니다. (텍스트가 전혀 생성되지 않은 경우에만 `None`일 수 있습니다.)
 - `attention` 딕셔너리는 각 블록마다 여러 헤드의 `[attn, grad]`를 저장한 리스트입니다.
+
+> **주의:** `.pt` 파일에는 실행 당시 선택된 스칼라(`target_scalar`)에 대한 gradient만 포함됩니다. 예를 들어 텍스트 기반 실험을 새 토큰/전략으로 수행하려면, 해당 모드/옵션으로 `simlingo_inference_baseline.py`를 다시 실행해 새로운 `.pt`를 생성해야 합니다.
 
 ### 정보 접근 방법
 
