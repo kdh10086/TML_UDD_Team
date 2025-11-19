@@ -1,238 +1,280 @@
-"""
-Generic Attention Explainability utilities adapted for Sim-Lingo VLA experiments.
+#!/usr/bin/env python3
+"""Generic Attention Explainability runner specialized for Sim-Lingo text mode.
 
-이 모듈은 Transformer-MM-Explainability 레포지토리(VisualBERT 백엔드)의
-`ExplanationGenerator` 구현을 참고하여, Sim-Lingo 추론 기록물에 저장된
-어텐션 맵과 그래디언트를 받아 GAE/rollout 방식의 토큰 관련성 맵 및
-이미지 히트맵을 생성하는 베이스라인을 제공합니다.
+이 스크립트는 Sim-Lingo InternVL2 추론 코드를 그대로 활용하여
+텍스트 로짓에 대해 언어 모델 블록의 어텐션/그래디언트를 훅으로 수집하고,
+Chefer의 Generic Attention 룰(논문의 rule 5/6)을 적용해 이미지 히트맵을 생성합니다.
 """
 
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
-from PIL import Image
 import torch
 import torch.nn.functional as F
-import cv2
+from PIL import Image
+
+from experiment.simlingo_inference_baseline import (
+    DEFAULT_CHECKPOINT_PATH,
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_SCENE_DIR,
+    TEXT_TOKEN_STRATEGIES,
+    SimLingoInferenceBaseline,
+)
+from simlingo_training.utils.custom_types import DrivingInput
+from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics
 
 
-def compute_rollout_attention(
-    all_layer_matrices: Sequence[torch.Tensor],
-    start_layer: int = 0,
-    add_residual: bool = True,
-) -> torch.Tensor:
-    """멀티 레이어 어텐션 행렬을 residual 포함하여 roll-out."""
-    if not all_layer_matrices:
-        raise ValueError("Empty attention matrix list passed to rollout.")
-
-    matrices = []
-    for mat in all_layer_matrices:
-        if mat.dim() != 3:
-            raise ValueError(f"Expected [B,S,S] matrix, got shape {mat.shape}")
-        if add_residual:
-            eye = torch.eye(mat.size(-1), device=mat.device, dtype=mat.dtype)
-            mat = mat + eye.unsqueeze(0)
-        matrices.append(mat)
-
-    joint = matrices[start_layer]
-    for idx in range(start_layer + 1, len(matrices)):
-        joint = matrices[idx].bmm(joint)
-    return joint
+def avg_heads(cam: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
+    """rule 5 — head-wise gradient weighting."""
+    if grad is None:
+        raise RuntimeError("Gradient tensor is required to compute Generic Attention CAM.")
+    cam = cam.reshape(-1, cam.shape[-2], cam.shape[-1])
+    grad = grad.reshape(-1, grad.shape[-2], grad.shape[-1])
+    cam = grad * cam
+    cam = cam.clamp(min=0).mean(dim=0)
+    return cam
 
 
-def _normalize_rows(matrix: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    denom = matrix.sum(dim=-1, keepdim=True).clamp_min(eps)
-    return matrix / denom
+def apply_self_attention_rules(R_ss: torch.Tensor, cam_ss: torch.Tensor) -> torch.Tensor:
+    """rule 6 — propagate relevance with Ā · R."""
+    return torch.matmul(cam_ss, R_ss)
 
 
-def _prepare_single_matrix(
-    attn: torch.Tensor,
-    grad: Optional[torch.Tensor],
-    clamp: bool = True,
-    average_heads: bool = True,
-) -> torch.Tensor:
-    """어텐션/그래디언트 텐서를 [B,S,S] 형태로 변환."""
-    if attn.dim() == 4:
-        # assume [B, H, S, S]
-        bsz = attn.size(0)
-    elif attn.dim() == 3:
-        bsz = 1
-        attn = attn.unsqueeze(0)
-    else:
-        raise ValueError(f"Unexpected attention tensor shape {attn.shape}")
-
-    if grad is not None:
-        if grad.shape != attn.shape:
-            if grad.dim() == attn.dim() - 1:
-                grad = grad.unsqueeze(0)
-            else:
-                raise ValueError(f"Gradient shape {grad.shape} incompatible with attn {attn.shape}")
-        grad = grad.to(attn.device)
-        attn = attn * grad
-
-    if clamp:
-        attn = attn.clamp(min=0)
-
-    if average_heads:
-        attn = attn.mean(dim=1, keepdim=False)
-
-    return attn  # [B, S, S]
+def show_cam_on_image(img: np.ndarray, mask: np.ndarray, colormap_code: int, alpha: float) -> np.ndarray:
+    """원본 이미지를 [0,1] 범위로 받고 히트맵을 덮어씌워 시각화를 만든다."""
+    heatmap = cv2.applyColorMap(np.uint8(255 * mask), colormap_code)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    heatmap = np.float32(heatmap) / 255.0
+    cam = (1 - alpha) * np.float32(img) + alpha * heatmap
+    cam = np.clip(cam, 0, 1)
+    return cam
 
 
-def prepare_attention_matrices(
-    attention_records: Dict[str, Iterable[Dict[str, torch.Tensor]]],
-    layer_filter: Optional[str] = None,
-    sort_keys: bool = True,
-) -> List[torch.Tensor]:
-    """Recorder에서 저장한 dict를 GAE 입력 행렬로 변환."""
-    items = attention_records.items()
-    if sort_keys:
-        items = sorted(items, key=lambda kv: kv[0])
-
-    matrices: List[torch.Tensor] = []
-    for name, records in items:
-        if layer_filter is not None and layer_filter not in name:
-            continue
-        layer_tensors: List[torch.Tensor] = []
-        for entry in records:
-            attn = entry["attn"]
-            grad = entry.get("grad")
-            layer_tensors.append(_prepare_single_matrix(attn, grad))
-        if not layer_tensors:
-            continue
-        layer_matrix = torch.stack(layer_tensors, dim=0).mean(dim=0)
-        matrices.append(layer_matrix)
-    if not matrices:
-        raise ValueError("No attention matrices found after filtering.")
-    return matrices
-
-
-def build_token_relevance(
-    attention_records: Dict[str, Iterable[Dict[str, torch.Tensor]]],
-    output_token_index: int = 0,
-    layer_filter: Optional[str] = "vision_block",
-    start_layer: int = 0,
-    residual_alpha: float = 0.5,
-) -> torch.Tensor:
-    """Gradient-weighted 어텐션을 사용해 토큰 관련성을 계산."""
-    matrices = prepare_attention_matrices(attention_records, layer_filter=layer_filter)
-    processed: List[torch.Tensor] = []
-    for mat in matrices:
-        mat = _normalize_rows(mat)
-        alpha = residual_alpha
-        eye = torch.eye(mat.size(-1), device=mat.device, dtype=mat.dtype).unsqueeze(0)
-        mat = alpha * eye + (1 - alpha) * mat
-        processed.append(mat)
-    rollout = compute_rollout_attention(processed, start_layer=start_layer, add_residual=False)
-    if output_token_index >= rollout.size(1):
-        raise IndexError(f"Token index {output_token_index} out of range for rollout matrix.")
-    relevance = rollout[:, output_token_index, :]
-    return relevance.squeeze(0)
-
-
-def extract_image_token_scores(
-    token_relevance: torch.Tensor,
-    meta: Dict[str, int],
-    cls_has_index_zero: bool = True,
-) -> torch.Tensor:
-    """토큰 관련성에서 이미지 토큰 구간만 추출."""
-    num_image_tokens = meta.get("num_total_image_tokens")
-    if num_image_tokens is None:
-        raise KeyError("meta dict must contain 'num_total_image_tokens'.")
-    start = 1 if cls_has_index_zero else 0
-    end = start + num_image_tokens
-    if end > token_relevance.numel():
-        raise ValueError(
-            f"Token relevance length {token_relevance.numel()} smaller than requested slice {end}."
-        )
-    return token_relevance[start:end]
-
-
-def tokens_to_heatmap(
-    image_token_scores: torch.Tensor,
-    meta: Dict[str, int],
-    normalize: bool = True,
-) -> torch.Tensor:
-    """이미지 토큰 관련성을 원본 해상도 히트맵으로 반환."""
-    num_tokens = image_token_scores.numel()
-    grid_size = int(math.sqrt(num_tokens))
-    if grid_size * grid_size != num_tokens:
-        raise ValueError(
-            f"Number of image tokens ({num_tokens}) is not a perfect square; "
-            "cannot reshape into 2D grid automatically."
-        )
-    heatmap = image_token_scores.reshape(1, 1, grid_size, grid_size)
-    H = int(meta["original_height"])
-    W = int(meta["original_width"])
-    heatmap = F.interpolate(heatmap, size=(H, W), mode="bilinear", align_corners=False)
-    heatmap = heatmap.squeeze(0).squeeze(0)
-    if normalize:
-        max_val = heatmap.max().clamp_min(1e-6)
-        heatmap = heatmap / max_val
-    return heatmap
-
-
-def save_heatmap_overlay(
-    heatmap: torch.Tensor,
-    image_path: Path,
-    output_path: Path,
-    colormap: str = "jet",
-    alpha: float = 0.5,
-) -> None:
-    """원본 이미지를 읽어 히트맵을 합성한 뒤 저장."""
-    heatmap_np = heatmap.detach().cpu().numpy()
-    heatmap_uint8 = np.uint8(255 * heatmap_np)
-    color = cv2.applyColorMap(heatmap_uint8, getattr(cv2, f"COLORMAP_{colormap.upper()}"))
-    color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
-    image = np.array(Image.open(image_path).convert("RGB"))
-    overlay = (alpha * color + (1 - alpha) * image).clip(0, 255).astype(np.uint8)
-    Image.fromarray(overlay).save(output_path)
-
-
-class GenericAttentionBaseline:
-    """Sim-Lingo GAE-style relevancy generator built on saved inference payloads."""
+class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
+    """Sim-Lingo 텍스트 모드 기반 Generic Attention 히트맵 생성기."""
 
     def __init__(
         self,
-        layer_filter: str = "vision_block",
-        start_layer: int = 0,
-        residual_alpha: float = 0.5,
-        cls_index: int = 0,
+        config_path: Path = DEFAULT_CONFIG_PATH,
+        checkpoint_path: Path = DEFAULT_CHECKPOINT_PATH,
+        device: Optional[str] = None,
+        text_token_strategy: str = "max",
+        text_token_index: int = -1,
+        colormap: str = "JET",
+        alpha: float = 0.5,
     ) -> None:
-        self.layer_filter = layer_filter
-        self.start_layer = start_layer
-        self.residual_alpha = residual_alpha
-        self.cls_index = cls_index
-
-    def compute_heatmap_from_payload(
-        self,
-        payload: Dict[str, Any],
-        output_dir: Path,
-        image_token_slice: Optional[Tuple[int, int]] = None,
-        suffix: str = "gae",
-    ) -> Path:
-        """단일 추론 결과(.pt) dict에서 히트맵을 계산하고 저장."""
-        attention = payload["attention"]
-        meta = payload["meta"]
-        token_relevance = build_token_relevance(
-            attention,
-            output_token_index=self.cls_index,
-            layer_filter=self.layer_filter,
-            start_layer=self.start_layer,
-            residual_alpha=self.residual_alpha,
+        super().__init__(
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            device=device,
+            target_mode="auto",
+            explain_mode="text",
+            text_token_strategy=text_token_strategy,
+            text_token_index=text_token_index,
         )
-        if image_token_slice is None:
-            image_scores = extract_image_token_scores(token_relevance, meta, cls_has_index_zero=True)
-        else:
-            start, end = image_token_slice
-            image_scores = token_relevance[start:end]
-        heatmap = tokens_to_heatmap(image_scores, meta)
+        cmap_name = colormap.upper()
+        attr_name = f"COLORMAP_{cmap_name}"
+        if not hasattr(cv2, attr_name):
+            raise ValueError(f"Unsupported OpenCV colormap: {colormap}")
+        self.colormap_code = getattr(cv2, attr_name)
+        if not (0.0 <= alpha <= 1.0):
+            raise ValueError("alpha must be between 0 and 1.")
+        self.alpha = alpha
+        self.img_context_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+
+    def generate_scene_heatmaps(self, scene_dir: Path, output_dir: Path, suffix: str = "generic_text") -> None:
+        """scene_dir 내 이미지들에 대해 히트맵을 생성하고 저장한다."""
+        scene_dir = Path(scene_dir)
+        output_dir = Path(output_dir)
+        if not scene_dir.exists():
+            raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        image_path = Path(payload["image_path"])
+        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir.name, suffix)
+        image_paths = sorted(
+            [p for p in scene_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        )
+        for image_path in image_paths:
+            self._process_single_image(image_path, scenario_output_dir, suffix)
+
+    def _process_single_image(self, image_path: Path, output_dir: Path, suffix: str) -> Path:
+        record_tag = image_path.stem
+        self.recorder.start_recording(record_tag)
+        driving_input, meta, prompt_token_ids = self._prepare_driving_input_with_prompt(image_path)
+        outputs = self.model(driving_input)
+        text_features = self._gather_text_features()
+        if text_features is None:
+            raise RuntimeError("Model did not return generated token information.")
+        target_scalar, target_meta = self._compute_text_target(text_features)
+        if target_scalar is None:
+            raise RuntimeError("Failed to build scalar target for text mode Generic Attention.")
+        target_scalar.backward(retain_graph=False)
+        attention_maps = self.recorder.stop_recording()
+        self.model.zero_grad(set_to_none=True)
+        relevance = self._compute_language_relevance(attention_maps)
+        prompt_len = len(prompt_token_ids)
+        generated_len = len(text_features["token_ids"])
+        seq_len = relevance.shape[0]
+        if seq_len < prompt_len + generated_len:
+            raise RuntimeError(
+                f"Recorded sequence ({seq_len}) shorter than prompt+generated tokens ({prompt_len + generated_len})."
+            )
+        token_index = target_meta["token_index"]
+        source_index = prompt_len + token_index
+        if source_index >= seq_len:
+            raise IndexError(
+                f"Target token index ({source_index}) exceeds recorded attention sequence ({seq_len})."
+            )
+        image_token_positions = self._select_image_token_positions(prompt_token_ids, meta["num_total_image_tokens"])
+        token_scores = relevance[source_index, image_token_positions]
+        heatmap = self._scores_to_heatmap(token_scores, meta)
+        overlay = self._render_overlay(image_path, heatmap)
         output_path = output_dir / f"{image_path.stem}_{suffix}.png"
-        save_heatmap_overlay(heatmap, image_path, output_path)
+        Image.fromarray(overlay).save(output_path)
         return output_path
+
+    def _prepare_driving_input_with_prompt(
+        self, image_path: Path
+    ) -> Tuple[DrivingInput, Dict[str, int], List[int]]:
+        """언어 토큰 시퀀스를 추가로 회수하기 위한 전처리."""
+        processed_image, num_patches, orig_hw = self._preprocess_image(image_path)
+        placeholder_batch_list: List[dict] = []
+        prompt_str = "Current speed: 0 m/s. Predict the waypoints."
+        lang_label = self._build_language_label(prompt_str, placeholder_batch_list, num_patches)
+        prompt_token_ids = self._extract_prompt_token_ids(lang_label)
+        camera_intrinsics = get_camera_intrinsics(orig_hw[1], orig_hw[0], 110).unsqueeze(0).unsqueeze(0)
+        camera_extrinsics = get_camera_extrinsics().unsqueeze(0).unsqueeze(0)
+        driving_input = DrivingInput(
+            camera_images=processed_image.to(self.device).bfloat16(),
+            image_sizes=torch.tensor([[orig_hw[0], orig_hw[1]]], dtype=torch.float32).to(self.device),
+            camera_intrinsics=camera_intrinsics.to(self.device),
+            camera_extrinsics=camera_extrinsics.to(self.device),
+            vehicle_speed=torch.zeros(1, 1, dtype=torch.float32, device=self.device),
+            target_point=torch.zeros(1, 2, dtype=torch.float32, device=self.device),
+            prompt=lang_label,
+            prompt_inference=lang_label,
+        )
+        meta = {
+            "original_height": orig_hw[0],
+            "original_width": orig_hw[1],
+            "num_patch_views": num_patches,
+            "num_image_tokens_per_patch": self.num_image_token,
+            "num_total_image_tokens": self.num_image_token * num_patches,
+        }
+        return driving_input, meta, prompt_token_ids
+
+    @staticmethod
+    def _extract_prompt_token_ids(lang_label) -> List[int]:
+        valid_mask = lang_label.phrase_valid[0].bool()
+        return lang_label.phrase_ids[0][valid_mask].tolist()
+
+    def _compute_language_relevance(
+        self, attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]]
+    ) -> torch.Tensor:
+        language_items = [(name, entries) for name, entries in attention_maps.items() if "language_block" in name]
+        if not language_items:
+            raise RuntimeError("No language block attention maps were recorded.")
+        language_items.sort(key=lambda kv: int(kv[0].split("_")[-1]))
+        relevance: Optional[torch.Tensor] = None
+        for _, entries in language_items:
+            attn_list = [entry["attn"] for entry in entries if entry.get("attn") is not None]
+            grad_list = [entry["grad"] for entry in entries if entry.get("grad") is not None]
+            if not attn_list or not grad_list:
+                continue
+            attn = torch.stack(attn_list, dim=0).mean(dim=0)
+            grad = torch.stack(grad_list, dim=0).mean(dim=0)
+            cam = avg_heads(attn, grad)
+            if relevance is None:
+                num_tokens = cam.shape[-1]
+                relevance = torch.eye(num_tokens, num_tokens, dtype=cam.dtype, device=cam.device)
+            relevance = relevance + apply_self_attention_rules(relevance, cam)
+        if relevance is None:
+            raise RuntimeError("Unable to build relevance due to empty attention/gradient pairs.")
+        return relevance
+
+    def _select_image_token_positions(self, prompt_token_ids: List[int], expected: int) -> List[int]:
+        positions = [idx for idx, token_id in enumerate(prompt_token_ids) if token_id == self.img_context_token_id]
+        if len(positions) < expected:
+            raise RuntimeError(
+                f"Located {len(positions)} <IMG_CONTEXT> tokens, but expected {expected} image tokens."
+            )
+        return positions[:expected]
+
+    def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
+        num_views = int(meta["num_patch_views"])
+        tokens_per_view = int(meta["num_image_tokens_per_patch"])
+        total_tokens = int(meta["num_total_image_tokens"])
+        if token_scores.numel() != total_tokens:
+            raise RuntimeError(
+                f"Token score length ({token_scores.numel()}) does not match meta ({total_tokens})."
+            )
+        grid = int(math.sqrt(tokens_per_view))
+        if grid * grid != tokens_per_view:
+            raise RuntimeError(
+                f"Tokens per patch ({tokens_per_view}) is not a perfect square; cannot reshape to grid."
+            )
+        scores = token_scores.view(num_views, 1, grid, grid)
+        scores = scores.mean(dim=0)  # 단순 평균으로 뷰를 통합
+        H = int(meta["original_height"])
+        W = int(meta["original_width"])
+        heatmap = F.interpolate(scores, size=(H, W), mode="bilinear", align_corners=False)
+        heatmap = heatmap.squeeze(0).squeeze(0)
+        heatmap = heatmap - heatmap.min()
+        heatmap = heatmap / heatmap.max().clamp_min(1e-6)
+        return heatmap
+
+    def _render_overlay(self, image_path: Path, heatmap: torch.Tensor) -> np.ndarray:
+        heatmap_np = heatmap.detach().cpu().numpy()
+        image = np.array(Image.open(image_path).convert("RGB"), dtype=np.float32) / 255.0
+        blended = show_cam_on_image(image, heatmap_np, self.colormap_code, self.alpha)
+        return np.uint8(255 * blended)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Sim-Lingo text-mode Generic Attention heatmap generator")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Hydra config path.")
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT_PATH, help="Model checkpoint path.")
+    parser.add_argument("--scene_dir", type=Path, default=DEFAULT_SCENE_DIR, help="Directory with scene images.")
+    parser.add_argument("--output_dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory to save heatmaps.")
+    parser.add_argument("--device", type=str, default=None, help="Device identifier, e.g., cuda:0.")
+    parser.add_argument(
+        "--text_token_strategy",
+        type=str,
+        choices=list(TEXT_TOKEN_STRATEGIES),
+        default="max",
+        help="Strategy for selecting text logit to backpropagate.",
+    )
+    parser.add_argument(
+        "--text_token_index",
+        type=int,
+        default=-1,
+        help="Token index when --text_token_strategy=index.",
+    )
+    parser.add_argument("--colormap", type=str, default="JET", help="OpenCV colormap name (e.g., JET, VIRIDIS).")
+    parser.add_argument("--alpha", type=float, default=0.5, help="Blend ratio between original image and heatmap.")
+    parser.add_argument("--suffix", type=str, default="generic_text", help="Output filename suffix.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    runner = GenericAttentionTextVisualizer(
+        config_path=args.config,
+        checkpoint_path=args.checkpoint,
+        device=args.device,
+        text_token_strategy=args.text_token_strategy,
+        text_token_index=args.text_token_index,
+        colormap=args.colormap,
+        alpha=args.alpha,
+    )
+    runner.generate_scene_heatmaps(args.scene_dir, args.output_dir, suffix=args.suffix)
+
+
+if __name__ == "__main__":
+    main()
