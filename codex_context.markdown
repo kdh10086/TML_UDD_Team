@@ -38,6 +38,9 @@
 - payload 구조: `target_scalar`, `target_info`, `attention`(attn+grad per block), `meta`(원본 H/W, 이미지 토큰 수), `text_outputs`(token ids/scores/strings/decoded) 등이 포함됨. Generic/다른 메소드에서 재추론 없이 활용 가능해야 함.
 - 입력 규약: `scene_dir`는 시나리오 루트(`.../sorted_index/<city>/<scenario>`)를 가리키며, 스크립트가 하위 `images/`에서 프레임을 읽는다.
 - 출력 포맷: scene 단위로 `sorted_index(or original_index)_<city>_<scenario>_{mode}_{detail}_{YYMMDD_HHMM}/` 생성되고, 중복 시 `_1` 등 suffix로 덮어쓰기 방지. 여기서 `{detail}`은 action 모드면 kinematic metric 이름, text 모드면 text_token_strategy 이름. 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`, `input_images/`)가 있으며, 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`, `input_images/frame001.png`). PNG는 투명 배경 위에 투영점만 표시.
+- 전처리: `dynamic_preprocess` 호출 시 `use_global_img`가 config에 없을 경우 기본값으로 `True`를 사용하도록 방어 로직 추가.
+- 메모리 튜닝: CLI에서 `--image_size`(기본 448), `--max_patches`(기본 2)를 내려서 GPU 메모리를 줄일 수 있음. 필요 시 `--image_size 336 --max_patches 1` 등으로 실행.
+- 의존성: 추론 실행에 필요한 패키지는 루트 `requirements.txt`에 정리되어 있음. 의존성 오류가 나면 `pip install --user -r requirements.txt`로 설치.
 - Generic Attention: 현재 텍스트 모드 구현본이 `experiment/generic_attention_baseline.py`에 있으며, **앞으로 action/text 공용으로 `.pt`를 입력 받아 Chefer rule 5/6로 relevance만 누적→히트맵 저장**하도록 리팩터링 필요.
 - ViT 시각화: `experiment/vit_raw_attention.py`, `experiment/vit_attention_rollout.py`, `experiment/vit_attention_flow.py`가 구현 완료(현재는 직접 추론 실행 방식).
 - 통합 실행/데이터 루프: `run_all_methods.py` 등 통합 스크립트와 scene 데이터 준비는 미완.

@@ -3,6 +3,7 @@ codex_resume_savefile.txt
 checkpoints/
 data/
 tempCodeRunnerFile.py
+pretrained/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

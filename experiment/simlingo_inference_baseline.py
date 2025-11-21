@@ -44,6 +44,8 @@ DEFAULT_SCENE_DIR = Path("data/DADA-2000-Core/sorted_index/4/001")  # 기본 입
 DEFAULT_OUTPUT_DIR = Path("experiment_outputs/simlingo_inference")  # 기본 출력 디렉토리
 DEFAULT_EXPLAIN_MODE = os.environ.get("SIMLINGO_EXPLAIN_MODE", "action")  # action/text 모드 기본값
 DEFAULT_KINEMATIC_METRIC = "curv_energy"  # 운동학 함수 기본값
+DEFAULT_IMAGE_SIZE = 448  # 입력 리사이즈 (메모리 절감 필요 시 줄여서 사용)
+DEFAULT_MAX_PATCHES = 2  # dynamic_preprocess max_num (메모리 절감 필요 시 1)
 
 EPS = 1e-6
 DELTA_S = 1.0
@@ -252,6 +254,8 @@ class SimLingoInferenceBaseline:
         text_token_strategy: str = "max",
         text_token_index: int = -1,
         kinematic_metric: str = DEFAULT_KINEMATIC_METRIC,
+        image_size: int = DEFAULT_IMAGE_SIZE,
+        max_patches: int = DEFAULT_MAX_PATCHES,
     ) -> None:
         config_path = config_path or DEFAULT_CONFIG_PATH
         self.config_path = Path(config_path)
@@ -274,6 +278,8 @@ class SimLingoInferenceBaseline:
         if kinematic_metric not in KINEMATIC_METRICS:
             raise ValueError(f"Unsupported kinematic metric: {kinematic_metric}")
         self.kinematic_metric = kinematic_metric
+        self.image_size = image_size
+        self.max_patches = max_patches
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(
             self.cfg.model.vision_model.variant, trust_remote_code=True
@@ -297,7 +303,7 @@ class SimLingoInferenceBaseline:
             }
         )
         self.tokenizer.padding_side = "left"
-        self.transform = build_transform(input_size=448)
+        self.transform = build_transform(input_size=self.image_size)
         self.T = 1
         self.num_image_token = self._compute_num_image_tokens(self.cfg.model.vision_model.variant)
         self.model = self._build_model()
@@ -684,11 +690,12 @@ class SimLingoInferenceBaseline:
     def _preprocess_image(self, image_path: Path):
         """Sim-Lingo용 동적 전처리를 수행해 패치 텐서를 반환합니다."""
         image = Image.open(image_path).convert("RGB")
+        use_global_img = getattr(self.cfg.model.vision_model, "use_global_img", True)
         images = dynamic_preprocess(
             image,
-            image_size=448,
-            use_thumbnail=self.cfg.model.vision_model.use_global_img,
-            max_num=2,
+            image_size=self.image_size,
+            use_thumbnail=use_global_img,
+            max_num=self.max_patches,
         )
         pixel_values = torch.stack([self.transform(img) for img in images])
         pixel_values = pixel_values.unsqueeze(0)
@@ -868,6 +875,18 @@ def parse_args():
         default=DEFAULT_KINEMATIC_METRIC,
         help="Kinematic scalar function to apply on action outputs before backprop.",
     )
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        default=DEFAULT_IMAGE_SIZE,
+        help="Input resize for dynamic_preprocess (reduce for lower GPU memory).",
+    )
+    parser.add_argument(
+        "--max_patches",
+        type=int,
+        default=DEFAULT_MAX_PATCHES,
+        help="Max number of patches (dynamic_preprocess max_num). Use 1 to reduce GPU memory.",
+    )
     return parser.parse_args()
 
 
@@ -883,6 +902,8 @@ def main():
         text_token_strategy=args.text_token_strategy,
         text_token_index=args.text_token_index,
         kinematic_metric=args.kinematic_metric,
+        image_size=args.image_size,
+        max_patches=args.max_patches,
     )
     runner.run_scene(args.scene_dir, args.output_dir)
 
