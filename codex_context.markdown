@@ -40,6 +40,7 @@
 - 출력 포맷: scene 단위로 `sorted_index(or original_index)_<city>_<scenario>_{mode}_{detail}_{YYMMDD_HHMM}/` 생성되고, 중복 시 `_1` 등 suffix로 덮어쓰기 방지. 여기서 `{detail}`은 action 모드면 kinematic metric 이름, text 모드면 text_token_strategy 이름. 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`, `input_images/`)가 있으며, 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`, `input_images/frame001.png`). PNG는 투명 배경 위에 투영점만 표시.
 - 전처리: `dynamic_preprocess` 호출 시 `use_global_img`가 config에 없을 경우 기본값으로 `True`를 사용하도록 방어 로직 추가.
 - 메모리 튜닝: CLI에서 `--image_size`(기본 448), `--max_patches`(기본 2)를 내려서 GPU 메모리를 줄일 수 있음. 필요 시 `--image_size 336 --max_patches 1` 등으로 실행.
+- 기본 해상도: 8GB VRAM 노트북 환경을 고려해 기본 `--image_size`는 224로 낮춘 상태이며, 필요 시 인자로 올려서 사용.
 - 의존성: 추론 실행에 필요한 패키지는 루트 `requirements.txt`에 정리되어 있음. 의존성 오류가 나면 `pip install --user -r requirements.txt`로 설치.
 - 오버레이/텍스트: pred_route/pred_speed_wps는 float32로 변환 후 투영해 오버레이 PNG를 생성. text_output은 모델 생성 텍스트(`text_outputs`가 있으면 이를, 없으면 `language` 필드 fallback)만 기록하며, 추가 LLM 후처리나 수치 템플릿 요약은 하지 않는다.
 - **속도 입력 문제(중대)**: SimLingo는 입력으로 이미지 + 현재 속도를 요구하나 DADA-2000에는 속도 데이터가 없음. 현재는 기본 0 m/s(또는 `--use_prev_speed`로 이전 예측 속도 주입)로 추론하지만, 이는 실제 상황과 불일치해 심각한 오판을 유발할 수 있음. 팀 차원 결정 필요. 후보:
