@@ -9,3 +9,6 @@
 [submodule "checkpoints/simlingo"]
 	path = checkpoints/simlingo
 	url = https://huggingface.co/RenzKa/simlingo
+[submodule "data/TML_UDD_Team"]
+	path = data/TML_UDD_Team
+	url = https://huggingface.co/datasets/alphax37/TML_UDD_Team
