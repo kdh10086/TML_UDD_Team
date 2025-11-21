@@ -44,8 +44,9 @@ DEFAULT_SCENE_DIR = Path("data/DADA-2000-Core/sorted_index/4/001")  # 기본 입
 DEFAULT_OUTPUT_DIR = Path("experiment_outputs/simlingo_inference")  # 기본 출력 디렉토리
 DEFAULT_EXPLAIN_MODE = os.environ.get("SIMLINGO_EXPLAIN_MODE", "action")  # action/text 모드 기본값
 DEFAULT_KINEMATIC_METRIC = "curv_energy"  # 운동학 함수 기본값
-DEFAULT_IMAGE_SIZE = 448  # 입력 리사이즈 (기본 448 : 메모리 절감 필요 시 336 - (우선순위 1))
+DEFAULT_IMAGE_SIZE = 224  # 입력 리사이즈 (기본 448 : 메모리 절감 필요 시 336 / 228 - (우선순위 1))
 DEFAULT_MAX_PATCHES = 2  # dynamic_preprocess max_num (기본 2 : 메모리 절감 필요 시 1 - (우선순위 2))
+DEFAULT_USE_PREV_SPEED = False  # 이전 프레임 예측 속도를 다음 프롬프트/vehicle_speed에 주입할지 여부
 
 EPS = 1e-6
 DELTA_S = 1.0
@@ -256,6 +257,7 @@ class SimLingoInferenceBaseline:
         kinematic_metric: str = DEFAULT_KINEMATIC_METRIC,
         image_size: int = DEFAULT_IMAGE_SIZE,
         max_patches: int = DEFAULT_MAX_PATCHES,
+        use_prev_speed: bool = DEFAULT_USE_PREV_SPEED,
     ) -> None:
         config_path = config_path or DEFAULT_CONFIG_PATH
         self.config_path = Path(config_path)
@@ -280,6 +282,7 @@ class SimLingoInferenceBaseline:
         self.kinematic_metric = kinematic_metric
         self.image_size = image_size
         self.max_patches = max_patches
+        self.use_prev_speed = use_prev_speed
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(
             self.cfg.model.vision_model.variant, trust_remote_code=True
@@ -418,6 +421,7 @@ class SimLingoInferenceBaseline:
             points = points.squeeze(0)
         if points.dim() != 2 or points.shape[1] != 2:
             return
+        points = points.float()
         H, W = image_hw
         K = get_camera_intrinsics(W, H, 110)
         if torch.is_tensor(K):
@@ -460,13 +464,19 @@ class SimLingoInferenceBaseline:
         self,
         output_path: Path,
         text_features: Optional[Dict[str, Any]],
+        language_fallback: Optional[Any] = None,
     ) -> None:
-        """생성 텍스트를 txt로 저장합니다."""
+        """생성 텍스트를 txt로 저장합니다. 기본은 모델이 생성한 문장, 없으면 fallback."""
         decoded = ""
         tokens: List[str] = []
         if text_features is not None:
             decoded = text_features.get("decoded_text") or ""
             tokens = text_features.get("token_strings") or []
+        if not decoded and language_fallback:
+            if isinstance(language_fallback, (list, tuple)):
+                decoded = " ".join(str(x) for x in language_fallback if x)
+            else:
+                decoded = str(language_fallback)
         text_lines = []
         if decoded:
             text_lines.append(decoded)
@@ -491,10 +501,12 @@ class SimLingoInferenceBaseline:
         image_paths = sorted(
             [p for p in images_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
+        prev_speed_est: Optional[float] = None
         for image_path in image_paths:
             record_tag = image_path.stem
             self.recorder.start_recording(record_tag)
-            driving_input, meta = self._prepare_driving_input(image_path)
+            current_speed = prev_speed_est if (self.use_prev_speed and prev_speed_est is not None) else 0.0
+            driving_input, meta = self._prepare_driving_input(image_path, current_speed=current_speed)
             outputs = self.model(driving_input)
             pred_speed_wps, pred_route, _ = outputs
             text_features = self._gather_text_features()
@@ -535,19 +547,28 @@ class SimLingoInferenceBaseline:
             self._write_text_outputs(
                 scenario_subdirs["text_output"] / f"{record_tag}.txt",
                 text_features,
+                language_fallback=outputs[-1],
             )
             self._write_tensor_txt(pred_route, scenario_subdirs["pred_route"] / f"{record_tag}.txt")
             self._write_tensor_txt(
                 pred_speed_wps, scenario_subdirs["pred_speed_wps"] / f"{record_tag}.txt"
             )
+            if self.use_prev_speed:
+                new_speed = self._estimate_speed_from_wps(pred_speed_wps)
+                if new_speed is not None:
+                    prev_speed_est = new_speed
             # 입력 원본 이미지도 정리용으로 복사
             shutil.copy2(image_path, scenario_subdirs["input_images"] / image_path.name)
 
-    def _prepare_driving_input(self, image_path: Path) -> Tuple[DrivingInput, Dict[str, Any]]:
+    def _prepare_driving_input(
+        self, image_path: Path, current_speed: float = 0.0
+    ) -> Tuple[DrivingInput, Dict[str, Any]]:
         """단일 이미지를 전처리하여 DrivingInput과 메타 정보를 생성합니다."""
         processed_image, num_patches, orig_hw = self._preprocess_image(image_path)
         placeholder_batch_list: List[dict] = []
-        prompt_str = "Current speed: 0 m/s. Predict the waypoints."
+        prompt_str = (
+            f"Current speed: {current_speed:.1f} m/s. What should the ego vehicle do next? Provide a short commentary."
+        )
         lang_label = self._build_language_label(prompt_str, placeholder_batch_list, num_patches)
         camera_intrinsics = get_camera_intrinsics(orig_hw[1], orig_hw[0], 110).unsqueeze(0).unsqueeze(0)
         camera_extrinsics = get_camera_extrinsics().unsqueeze(0).unsqueeze(0)
@@ -556,7 +577,7 @@ class SimLingoInferenceBaseline:
             image_sizes=torch.tensor([[orig_hw[0], orig_hw[1]]], dtype=torch.float32).to(self.device),
             camera_intrinsics=camera_intrinsics.to(self.device),
             camera_extrinsics=camera_extrinsics.to(self.device),
-            vehicle_speed=torch.zeros(1, 1, dtype=torch.float32, device=self.device),
+            vehicle_speed=torch.tensor([[current_speed]], dtype=torch.float32, device=self.device),
             target_point=torch.zeros(1, 2, dtype=torch.float32, device=self.device),
             prompt=lang_label,
             prompt_inference=lang_label,
@@ -676,6 +697,9 @@ class SimLingoInferenceBaseline:
             "token_strings": token_strings,
             "decoded_text": decoded_text,
         }
+
+    @staticmethod
+    # 행동 요약은 더 이상 사용하지 않음 (텍스트 출력은 모델 생성/펜싱 fallback만 사용)
 
     def _serialize_text_outputs(self, text_features: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """text_features 텐서를 CPU 리스트로 변환해 저장 가능하도록 만듭니다."""
@@ -890,6 +914,11 @@ def parse_args():
         default=DEFAULT_MAX_PATCHES,
         help="Max number of patches (dynamic_preprocess max_num). Use 1 to reduce GPU memory.",
     )
+    parser.add_argument(
+        "--use_prev_speed",
+        action="store_true",
+        help="Use previous frame pred_speed_wps to estimate speed for next prompt/vehicle_speed.",
+    )
     return parser.parse_args()
 
 
@@ -907,9 +936,29 @@ def main():
         kinematic_metric=args.kinematic_metric,
         image_size=args.image_size,
         max_patches=args.max_patches,
+        use_prev_speed=args.use_prev_speed,
     )
     runner.run_scene(args.scene_dir, args.output_dir)
 
 
 if __name__ == "__main__":
     main()
+    @staticmethod
+    def _estimate_speed_from_wps(pred_speed_wps: Optional[torch.Tensor]) -> Optional[float]:
+        """pred_speed_wps로부터 근사 속도를 계산한다. (m/s, 이상치 클램프)"""
+        if pred_speed_wps is None:
+            return None
+        speed = pred_speed_wps.detach().to("cpu").float()
+        if speed.dim() == 3:
+            speed = speed.squeeze(0)
+        if speed.numel() == 0 or speed.dim() != 2 or speed.shape[0] < 2:
+            return None
+        deltas = speed[1:] - speed[:-1]
+        norms = deltas.norm(dim=-1) / DELTA_T
+        if norms.numel() == 0:
+            return None
+        est = norms[:3].mean().item() if norms.numel() >= 3 else norms.mean().item()
+        if not np.isfinite(est):
+            return None
+        est = max(0.0, min(est, 30.0))  # 0~30 m/s 범위로 클램프
+        return est

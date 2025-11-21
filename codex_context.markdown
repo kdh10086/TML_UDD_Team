@@ -36,11 +36,17 @@
 - action 타깃: 액션 토큰이 아니라 **액션 MLP 출력( pred_route 20×2, pred_speed_wps 10×2 )을 곡선으로 근사 → 운동학 함수 → 스칼라 \(y_t\)**. kinematic metric은 플러그인(curv_energy/acc_energy/progress/brake/jerk 등).
 - text 타깃: 생성 텍스트 로짓에서 전략(max/last/index)으로 스칼라를 선택해 `backward` 수행.
 - payload 구조: `target_scalar`, `target_info`, `attention`(attn+grad per block), `meta`(원본 H/W, 이미지 토큰 수), `text_outputs`(token ids/scores/strings/decoded) 등이 포함됨. Generic/다른 메소드에서 재추론 없이 활용 가능해야 함.
-- 입력 규약: `scene_dir`는 시나리오 루트(`.../sorted_index/<city>/<scenario>`)를 가리키며, 스크립트가 하위 `images/`에서 프레임을 읽는다.
+- 입력 규약: `scene_dir`는 시나리오 루트(`.../sorted_index/<city>/<scenario>`)를 가리키며, 스크립트가 하위 `images/`에서 프레임을 읽는다. 프롬프트는 commentary 모드 고정(`Current speed: {speed} m/s. What should the ego vehicle do next? Provide a short commentary.`). 기본은 모든 프레임에 0 m/s를 입력·표기하며, `--use_prev_speed`를 켜면 이전 프레임 `pred_speed_wps`에서 속도를 근사(0~30 m/s 클램프, 3구간 평균)해 다음 프롬프트/`vehicle_speed`에 주입한다.
 - 출력 포맷: scene 단위로 `sorted_index(or original_index)_<city>_<scenario>_{mode}_{detail}_{YYMMDD_HHMM}/` 생성되고, 중복 시 `_1` 등 suffix로 덮어쓰기 방지. 여기서 `{detail}`은 action 모드면 kinematic metric 이름, text 모드면 text_token_strategy 이름. 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`, `input_images/`)가 있으며, 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`, `input_images/frame001.png`). PNG는 투명 배경 위에 투영점만 표시.
 - 전처리: `dynamic_preprocess` 호출 시 `use_global_img`가 config에 없을 경우 기본값으로 `True`를 사용하도록 방어 로직 추가.
 - 메모리 튜닝: CLI에서 `--image_size`(기본 448), `--max_patches`(기본 2)를 내려서 GPU 메모리를 줄일 수 있음. 필요 시 `--image_size 336 --max_patches 1` 등으로 실행.
 - 의존성: 추론 실행에 필요한 패키지는 루트 `requirements.txt`에 정리되어 있음. 의존성 오류가 나면 `pip install --user -r requirements.txt`로 설치.
+- 오버레이/텍스트: pred_route/pred_speed_wps는 float32로 변환 후 투영해 오버레이 PNG를 생성. text_output은 모델 생성 텍스트(`text_outputs`가 있으면 이를, 없으면 `language` 필드 fallback)만 기록하며, 추가 LLM 후처리나 수치 템플릿 요약은 하지 않는다.
+- **속도 입력 문제(중대)**: SimLingo는 입력으로 이미지 + 현재 속도를 요구하나 DADA-2000에는 속도 데이터가 없음. 현재는 기본 0 m/s(또는 `--use_prev_speed`로 이전 예측 속도 주입)로 추론하지만, 이는 실제 상황과 불일치해 심각한 오판을 유발할 수 있음. 팀 차원 결정 필요. 후보:
+  1) 시나리오 영상을 Gemini 등 LLM에 보내 초반 속도만 추정, 이후는 pred_speed_wps 기반 재귀 주입(초기값 검토 필요, 누적 오차 위험).
+  2) 시나리오 영상을 LLM에 보내 프레임별 속도 추정 후 각 프레임에 주입(실험 변수로 외부 모델 예측이 들어감, 비용/지연·정확도 리스크).
+  3) 속도 포함된 다른 데이터셋으로 전환(사고/GT 히트맵 여부는 재고, 속도+이미지 우선).
+  4) CARLA에서 사고 시나리오 자체 생성 후 추론(속도 정확, SimLingo 학습 분포와 일치, 변인 통제 우수하지만 구축 비용/VRAM·환경 설정 부담).
 - Generic Attention: 현재 텍스트 모드 구현본이 `experiment/generic_attention_baseline.py`에 있으며, **앞으로 action/text 공용으로 `.pt`를 입력 받아 Chefer rule 5/6로 relevance만 누적→히트맵 저장**하도록 리팩터링 필요.
 - ViT 시각화: `experiment/vit_raw_attention.py`, `experiment/vit_attention_rollout.py`, `experiment/vit_attention_flow.py`가 구현 완료(현재는 직접 추론 실행 방식).
 - 통합 실행/데이터 루프: `run_all_methods.py` 등 통합 스크립트와 scene 데이터 준비는 미완.
