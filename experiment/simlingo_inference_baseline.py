@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import hydra
+import numpy as np
 import torch
 from hydra.utils import to_absolute_path
 from omegaconf import OmegaConf
-from PIL import Image
+from PIL import Image, ImageDraw
 from transformers import AutoConfig, AutoProcessor
 
 # 어떤 위치에서 실행해도 external/simlingo 모듈을 불러올 수 있도록 경로 추가
@@ -34,7 +35,7 @@ if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
 from simlingo_training.models.driving import DrivingModel
 from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
 from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
-from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics
+from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics, project_points
 
 DEFAULT_CONFIG_PATH = Path("checkpoints/simlingo/simlingo/.hydra/config.yaml")  # 기본 Hydra config
 DEFAULT_CHECKPOINT_PATH = Path("checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt")  # 기본 ckpt
@@ -364,6 +365,92 @@ class SimLingoInferenceBaseline:
         candidate.mkdir(parents=True, exist_ok=False)
         return candidate
 
+    def _prepare_image_output_dir(self, scenario_output_dir: Path, image_stem: str) -> Path:
+        """입력 이미지 스템 이름을 따서 저장 디렉토리를 만들고 중복 시 숫자 suffix를 붙입니다."""
+        scenario_output_dir = Path(scenario_output_dir)
+        candidate = scenario_output_dir / image_stem
+        counter = 1
+        while candidate.exists():
+            candidate = scenario_output_dir / f"{image_stem}_{counter}"
+            counter += 1
+        candidate.mkdir(parents=True, exist_ok=False)
+        return candidate
+
+    def _project_and_draw_points(
+        self,
+        points: Optional[torch.Tensor],
+        image_hw: Tuple[int, int],
+        color: Tuple[int, int, int, int],
+        radius: int,
+        output_path: Path,
+    ) -> None:
+        """예측 궤적을 원본 해상도에 맞춰 투영한 뒤 투명 배경 PNG로 저장합니다."""
+        if points is None:
+            return
+        points = points.detach().to("cpu")
+        if points.numel() == 0:
+            return
+        if points.dim() == 3:
+            points = points.squeeze(0)
+        if points.dim() != 2 or points.shape[1] != 2:
+            return
+        H, W = image_hw
+        K = get_camera_intrinsics(W, H, 110)
+        if torch.is_tensor(K):
+            K_np = K.detach().cpu().numpy()
+        else:
+            K_np = np.asarray(K)
+        try:
+            projected = project_points(points.numpy(), K_np)
+        except Exception:
+            return
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        for coord in projected:
+            x, y = float(coord[0]), float(coord[1])
+            if not np.isfinite([x, y]).all():
+                continue
+            xi, yi = int(round(x)), int(round(y))
+            if 0 <= xi < W and 0 <= yi < H:
+                draw.ellipse((xi - radius, yi - radius, xi + radius, yi + radius), fill=color)
+        overlay.save(output_path)
+
+    @staticmethod
+    def _write_tensor_txt(tensor: Optional[torch.Tensor], output_path: Path) -> None:
+        """텐서를 CPU로 옮겨 txt로 저장합니다."""
+        if tensor is None:
+            return
+        tensor_cpu = tensor.detach().to("cpu")
+        if tensor_cpu.dim() == 3:
+            tensor_cpu = tensor_cpu.squeeze(0)
+        data = tensor_cpu.tolist()
+        lines: List[str] = []
+        for row in data:
+            if isinstance(row, (list, tuple)):
+                lines.append(" ".join(f"{float(x):.6f}" for x in row))
+            else:
+                lines.append(f"{float(row):.6f}")
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _write_text_outputs(
+        self,
+        output_dir: Path,
+        text_features: Optional[Dict[str, Any]],
+    ) -> None:
+        """생성 텍스트를 txt로 저장합니다."""
+        decoded = ""
+        tokens: List[str] = []
+        if text_features is not None:
+            decoded = text_features.get("decoded_text") or ""
+            tokens = text_features.get("token_strings") or []
+        text_lines = []
+        if decoded:
+            text_lines.append(decoded)
+        if tokens:
+            text_lines.append("")
+            text_lines.append("Tokens: " + " ".join(tokens))
+        (output_dir / "text_output.txt").write_text("\n".join(text_lines), encoding="utf-8")
+
     def run_scene(self, scene_dir: Path, output_dir: Path) -> None:
         """scene_dir의 모든 이미지를 순회하며 추론 결과를 payload 형태로 저장합니다."""
         scene_dir = Path(scene_dir)
@@ -379,9 +466,11 @@ class SimLingoInferenceBaseline:
         )
         for image_path in image_paths:
             record_tag = image_path.stem
+            image_output_dir = self._prepare_image_output_dir(scenario_output_dir, record_tag)
             self.recorder.start_recording(record_tag)
             driving_input, meta = self._prepare_driving_input(image_path)
             outputs = self.model(driving_input)
+            pred_speed_wps, pred_route, _ = outputs
             text_features = self._gather_text_features()
             target_scalar, target_meta = self._compute_target_scalar(outputs, text_features)
             if target_scalar is None:
@@ -400,8 +489,22 @@ class SimLingoInferenceBaseline:
                 "mode": self.explain_mode,
                 "attention": attention_maps,
             }
-            output_path = scenario_output_dir / f"{image_path.stem}_{mode_suffix}.pt"
-            torch.save(payload, output_path)
+            payload_path = image_output_dir / f"payload_{mode_suffix}.pt"
+            torch.save(payload, payload_path)
+            image_hw = (meta["original_height"], meta["original_width"])
+            self._project_and_draw_points(
+                pred_route, image_hw, (255, 0, 0, 255), radius=3, output_path=image_output_dir / "route_overlay.png"
+            )
+            self._project_and_draw_points(
+                pred_speed_wps,
+                image_hw,
+                (0, 200, 0, 255),
+                radius=2,
+                output_path=image_output_dir / "speed_overlay.png",
+            )
+            self._write_text_outputs(image_output_dir, text_features)
+            self._write_tensor_txt(pred_route, image_output_dir / "pred_route.txt")
+            self._write_tensor_txt(pred_speed_wps, image_output_dir / "pred_speed_wps.txt")
 
     def _prepare_driving_input(self, image_path: Path) -> Tuple[DrivingInput, Dict[str, Any]]:
         """단일 이미지를 전처리하여 DrivingInput과 메타 정보를 생성합니다."""

@@ -31,11 +31,12 @@
 
 ## 0.1 현재 구현 상태 / 부트업 체크리스트
 
-- 데이터: `data/`는 아직 비어 있음(`.gitkeep`만 존재). Scene 5개 선정·크롭 규약 확정이 여전히 최우선.
+- 데이터: `data/DADA-2000-Core/sorted_index/` 아래에 DADA-2000-Core 시나리오들이 준비됨(테스트는 여기 시나리오 사용). Scene 5개 선정·크롭 규약 확정은 여전히 필요.
 - 추론: `experiment/simlingo_inference_baseline.py` 완성. action/text 모드에서 **추론 시점에 kinematic/text 스칼라를 만들고 `backward()`까지 수행**하여 각 블록 어텐션+gradient를 `.pt` payload로 저장. 기본 경로는 `checkpoints/simlingo/simlingo/.hydra/config.yaml` / `checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt`(약 9GB, LFS).
 - action 타깃: 액션 토큰이 아니라 **액션 MLP 출력( pred_route 20×2, pred_speed_wps 10×2 )을 곡선으로 근사 → 운동학 함수 → 스칼라 \(y_t\)**. kinematic metric은 플러그인(curv_energy/acc_energy/progress/brake/jerk 등).
 - text 타깃: 생성 텍스트 로짓에서 전략(max/last/index)으로 스칼라를 선택해 `backward` 수행.
 - payload 구조: `target_scalar`, `target_info`, `attention`(attn+grad per block), `meta`(원본 H/W, 이미지 토큰 수), `text_outputs`(token ids/scores/strings/decoded) 등이 포함됨. Generic/다른 메소드에서 재추론 없이 활용 가능해야 함.
+- 출력 포맷: scene 단위로 `sceneName_{mode}_{YYMMDD_HHMM}/` 디렉토리가 생성되고, 그 안에 각 입력 이미지 스템 이름의 서브폴더가 있음. 각 서브폴더에는 `payload_{mode}.pt`, pred_route 투영점만을 담은 투명 PNG(`route_overlay.png`), pred_speed_wps 투영점만을 담은 투명 PNG(`speed_overlay.png`), `text_output.txt`, `pred_route.txt`(20×2), `pred_speed_wps.txt`(10×2)가 저장됨.
 - Generic Attention: 현재 텍스트 모드 구현본이 `experiment/generic_attention_baseline.py`에 있으며, **앞으로 action/text 공용으로 `.pt`를 입력 받아 Chefer rule 5/6로 relevance만 누적→히트맵 저장**하도록 리팩터링 필요.
 - ViT 시각화: `experiment/vit_raw_attention.py`, `experiment/vit_attention_rollout.py`, `experiment/vit_attention_flow.py`가 구현 완료(현재는 직접 추론 실행 방식).
 - 통합 실행/데이터 루프: `run_all_methods.py` 등 통합 스크립트와 scene 데이터 준비는 미완.
@@ -59,6 +60,7 @@
 ### a. Scene 구간 5개 찾기 (Phase 1, 최우선)
 
 - 시나리오를 여러 번 돌려보면서 **실험에 사용할 “Scene 구간” 5개**를 선정한다.
+- 현재 테스트 데이터 루트: `data/DADA-2000-Core/sorted_index/` (DADA-2000-Core 정렬 시나리오). 여기에서 Scene 5개를 선정하고 크롭/리사이즈 규약을 확정한다.
 - 각 Scene 구간은:
   - **히트맵이 시각적으로 의미 있고 아름답게** 나와야 한다.
   - **사고 직전 일반 상태**가 잠깐 포함되어야 한다.
