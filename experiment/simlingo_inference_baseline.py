@@ -44,8 +44,8 @@ DEFAULT_SCENE_DIR = Path("data/DADA-2000-Core/sorted_index/4/001")  # 기본 입
 DEFAULT_OUTPUT_DIR = Path("experiment_outputs/simlingo_inference")  # 기본 출력 디렉토리
 DEFAULT_EXPLAIN_MODE = os.environ.get("SIMLINGO_EXPLAIN_MODE", "action")  # action/text 모드 기본값
 DEFAULT_KINEMATIC_METRIC = "curv_energy"  # 운동학 함수 기본값
-DEFAULT_IMAGE_SIZE = 448  # 입력 리사이즈 (메모리 절감 필요 시 줄여서 사용)
-DEFAULT_MAX_PATCHES = 2  # dynamic_preprocess max_num (메모리 절감 필요 시 1)
+DEFAULT_IMAGE_SIZE = 448  # 입력 리사이즈 (기본 448 : 메모리 절감 필요 시 336 - (우선순위 1))
+DEFAULT_MAX_PATCHES = 2  # dynamic_preprocess max_num (기본 2 : 메모리 절감 필요 시 1 - (우선순위 2))
 
 EPS = 1e-6
 DELTA_S = 1.0
@@ -305,17 +305,20 @@ class SimLingoInferenceBaseline:
         self.tokenizer.padding_side = "left"
         self.transform = build_transform(input_size=self.image_size)
         self.T = 1
-        self.num_image_token = self._compute_num_image_tokens(self.cfg.model.vision_model.variant)
+        self.num_image_token = self._compute_num_image_tokens(
+            self.cfg.model.vision_model.variant, image_size_override=self.image_size
+        )
         self.model = self._build_model()
         self.recorder = AttentionRecorder()
         self._register_attention_hooks()
 
-    def _compute_num_image_tokens(self, encoder_variant: str) -> int:
+    def _compute_num_image_tokens(self, encoder_variant: str, image_size_override: Optional[int] = None) -> int:
         """InternVL2 비전 인코더 설정에서 이미지 토큰(패치 수)을 계산합니다."""
         cfg = AutoConfig.from_pretrained(encoder_variant, trust_remote_code=True)
-        image_size = cfg.force_image_size or cfg.vision_config.image_size
+        image_size = image_size_override or cfg.force_image_size or cfg.vision_config.image_size
         patch_size = cfg.vision_config.patch_size
-        return int((image_size // patch_size) ** 2 * (cfg.downsample_ratio ** 2))
+        downsample = getattr(cfg, "downsample_ratio", getattr(cfg.vision_config, "downsample_ratio", 1.0))
+        return int((image_size // patch_size) ** 2 * (downsample ** 2))
 
     def _build_model(self) -> DrivingModel:
         """Hydra 설정으로 DrivingModel을 만들고 체크포인트를 불러온 뒤 어텐션 출력을 활성화합니다."""
