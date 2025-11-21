@@ -2,6 +2,7 @@ codex_resume_savefile.txt
 .vscode/
 checkpoints/
 data/
+tempCodeRunnerFile.py
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

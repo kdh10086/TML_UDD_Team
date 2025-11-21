@@ -36,7 +36,8 @@
 - action 타깃: 액션 토큰이 아니라 **액션 MLP 출력( pred_route 20×2, pred_speed_wps 10×2 )을 곡선으로 근사 → 운동학 함수 → 스칼라 \(y_t\)**. kinematic metric은 플러그인(curv_energy/acc_energy/progress/brake/jerk 등).
 - text 타깃: 생성 텍스트 로짓에서 전략(max/last/index)으로 스칼라를 선택해 `backward` 수행.
 - payload 구조: `target_scalar`, `target_info`, `attention`(attn+grad per block), `meta`(원본 H/W, 이미지 토큰 수), `text_outputs`(token ids/scores/strings/decoded) 등이 포함됨. Generic/다른 메소드에서 재추론 없이 활용 가능해야 함.
-- 출력 포맷: scene 단위로 `sceneName_{mode}_{YYMMDD_HHMM}/` 생성되고, 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`)가 있음. 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`). PNG는 투명 배경 위에 투영점만 표시.
+- 입력 규약: `scene_dir`는 시나리오 루트(`.../sorted_index/<city>/<scenario>`)를 가리키며, 스크립트가 하위 `images/`에서 프레임을 읽는다.
+- 출력 포맷: scene 단위로 `sorted_index(or original_index)_<city>_<scenario>_{mode}_{detail}_{YYMMDD_HHMM}/` 생성되고, 중복 시 `_1` 등 suffix로 덮어쓰기 방지. 여기서 `{detail}`은 action 모드면 kinematic metric 이름, text 모드면 text_token_strategy 이름. 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`, `input_images/`)가 있으며, 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`, `input_images/frame001.png`). PNG는 투명 배경 위에 투영점만 표시.
 - Generic Attention: 현재 텍스트 모드 구현본이 `experiment/generic_attention_baseline.py`에 있으며, **앞으로 action/text 공용으로 `.pt`를 입력 받아 Chefer rule 5/6로 relevance만 누적→히트맵 저장**하도록 리팩터링 필요.
 - ViT 시각화: `experiment/vit_raw_attention.py`, `experiment/vit_attention_rollout.py`, `experiment/vit_attention_flow.py`가 구현 완료(현재는 직접 추론 실행 방식).
 - 통합 실행/데이터 루프: `run_all_methods.py` 등 통합 스크립트와 scene 데이터 준비는 미완.
@@ -436,6 +437,7 @@ Phase 1이 완료되었다고 가정하면:
 3. Sim-Lingo 추론 로직은 **한 곳(run_inference 등)에만 구현**하고, 모든 메소드는 이 모듈의 출력(토큰/trajectory/attention/grad/텍스트)을 사용한다.
 4. 운동학 함수(종방향/횡방향)는 **플러그인/모듈형 구조**로 구현하되, 0 부근 기울기 소멸을 피하기 위해 softplus/작은 1차 항/보조 메트릭 혼합 등을 활용한다.
 5. 최종적으로 `run_all_methods.py` 같은 스크립트에서 **원터치 실행**으로 5개 메소드의 히트맵을 모두 생성할 수 있도록 해야 한다.
+6. 코드 변경 시, 본 문서(`codex_context.markdown`)에 적힌 맥락과 달라진 부분이 있으면 최신 맥락에 맞게 필요한 부분만 업데이트한다(내용 전체 덮어쓰기·삭제 등 급진적 변경은 피하고, 차이 나는 부분만 신중히 보정).
 
 기본 언어는 한국어로 하며, 정중하고 신중한 말투를 사용해야한다.
 이 파일의 내용은 **코드 어시스턴트에게 주입되는 상시 컨텍스트**로 사용되며,  

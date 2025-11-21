@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import shutil
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -39,7 +40,7 @@ from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsic
 
 DEFAULT_CONFIG_PATH = Path("checkpoints/simlingo/simlingo/.hydra/config.yaml")  # 기본 Hydra config
 DEFAULT_CHECKPOINT_PATH = Path("checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt")  # 기본 ckpt
-DEFAULT_SCENE_DIR = Path("data/scene01")  # 기본 입력 이미지 디렉토리
+DEFAULT_SCENE_DIR = Path("data/DADA-2000-Core/sorted_index/4/001")  # 기본 입력 시나리오 디렉토리(하위 images 사용)
 DEFAULT_OUTPUT_DIR = Path("experiment_outputs/simlingo_inference")  # 기본 출력 디렉토리
 DEFAULT_EXPLAIN_MODE = os.environ.get("SIMLINGO_EXPLAIN_MODE", "action")  # action/text 모드 기본값
 DEFAULT_KINEMATIC_METRIC = "curv_energy"  # 운동학 함수 기본값
@@ -351,12 +352,22 @@ class SimLingoInferenceBaseline:
         for idx, block in enumerate(layers):
             self.recorder.register_module(block, f"language_block_{idx}")
 
-    def _prepare_output_subdir(self, output_root: Path, scenario_name: str, mode_suffix: str) -> Path:
-        """scene-모드-타임스탬프 규칙으로 하위 디렉토리를 만들고 중복 시 숫자 suffix를 붙입니다."""
+    def _build_scenario_name(self, scenario_dir: Path) -> str:
+        """시나리오 경로에서 정렬/원본, city 번호, 시나리오 번호를 추출해 접두어를 만듭니다."""
+        scenario_dir = scenario_dir.resolve()
+        scenario_id = scenario_dir.name
+        city_id = scenario_dir.parent.name if scenario_dir.parent else "unknown"
+        index_type = scenario_dir.parent.parent.name if scenario_dir.parent and scenario_dir.parent.parent else "scene"
+        return f"{index_type}_{city_id}_{scenario_id}"
+
+    def _prepare_output_subdir(self, output_root: Path, scenario_dir: Path, mode_suffix: str) -> Path:
+        """정규화된 시나리오 이름과 모드, 타겟 설정, 타임스탬프 규칙으로 하위 디렉토리를 만듭니다."""
         output_root = Path(output_root)
         output_root.mkdir(parents=True, exist_ok=True)
+        scenario_name = self._build_scenario_name(scenario_dir)
         timestamp = datetime.now().strftime("%y%m%d_%H%M")
-        base_name = f"{scenario_name}_{mode_suffix}_{timestamp}"
+        detail = self.kinematic_metric if mode_suffix == "action" else self.text_token_strategy
+        base_name = f"{scenario_name}_{mode_suffix}_{detail}_{timestamp}"
         candidate = output_root / base_name
         counter = 1
         while candidate.exists():
@@ -374,6 +385,7 @@ class SimLingoInferenceBaseline:
             "text_output": scenario_output_dir / "text_output",
             "pred_route": scenario_output_dir / "pred_route",
             "pred_speed_wps": scenario_output_dir / "pred_speed_wps",
+            "input_images": scenario_output_dir / "input_images",
         }
         for path in subdirs.values():
             path.mkdir(parents=True, exist_ok=True)
@@ -455,18 +467,20 @@ class SimLingoInferenceBaseline:
         output_path.write_text("\n".join(text_lines), encoding="utf-8")
 
     def run_scene(self, scene_dir: Path, output_dir: Path) -> None:
-        """scene_dir의 모든 이미지를 순회하며 추론 결과를 payload 형태로 저장합니다."""
+        """시나리오 디렉토리(하위 images/)의 모든 이미지를 순회하며 추론 결과를 저장합니다."""
         scene_dir = Path(scene_dir)
         output_dir = Path(output_dir)
         if not scene_dir.exists():
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        scenario_name = scene_dir.name
+        images_dir = scene_dir / "images"
+        if not images_dir.exists():
+            raise FileNotFoundError(f"'images' subdirectory not found under {scene_dir}")
         mode_suffix = "action" if self.explain_mode == "action" else "text"
-        scenario_output_dir = self._prepare_output_subdir(output_dir, scenario_name, mode_suffix)
+        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, mode_suffix)
         scenario_subdirs = self._prepare_scenario_subdirs(scenario_output_dir)
         image_paths = sorted(
-            [p for p in scene_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+            [p for p in images_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
         for image_path in image_paths:
             record_tag = image_path.stem
@@ -517,6 +531,8 @@ class SimLingoInferenceBaseline:
             self._write_tensor_txt(
                 pred_speed_wps, scenario_subdirs["pred_speed_wps"] / f"{record_tag}.txt"
             )
+            # 입력 원본 이미지도 정리용으로 복사
+            shutil.copy2(image_path, scenario_subdirs["input_images"] / image_path.name)
 
     def _prepare_driving_input(self, image_path: Path) -> Tuple[DrivingInput, Dict[str, Any]]:
         """단일 이미지를 전처리하여 DrivingInput과 메타 정보를 생성합니다."""
@@ -809,7 +825,7 @@ def parse_args():
         "--scene_dir",
         type=Path,
         default=DEFAULT_SCENE_DIR,
-        help=f"Directory with input images (default: {DEFAULT_SCENE_DIR})",
+        help=f"Scenario directory containing 'images/' subfolder (default: {DEFAULT_SCENE_DIR})",
     )
     parser.add_argument(
         "--output_dir",
