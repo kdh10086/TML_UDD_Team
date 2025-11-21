@@ -365,16 +365,19 @@ class SimLingoInferenceBaseline:
         candidate.mkdir(parents=True, exist_ok=False)
         return candidate
 
-    def _prepare_image_output_dir(self, scenario_output_dir: Path, image_stem: str) -> Path:
-        """입력 이미지 스템 이름을 따서 저장 디렉토리를 만들고 중복 시 숫자 suffix를 붙입니다."""
-        scenario_output_dir = Path(scenario_output_dir)
-        candidate = scenario_output_dir / image_stem
-        counter = 1
-        while candidate.exists():
-            candidate = scenario_output_dir / f"{image_stem}_{counter}"
-            counter += 1
-        candidate.mkdir(parents=True, exist_ok=False)
-        return candidate
+    def _prepare_scenario_subdirs(self, scenario_output_dir: Path) -> Dict[str, Path]:
+        """시나리오 단위 하위 디렉토리(파일 유형별)를 모두 생성합니다."""
+        subdirs = {
+            "pt": scenario_output_dir / "pt",
+            "route_overlay": scenario_output_dir / "route_overlay",
+            "speed_overlay": scenario_output_dir / "speed_overlay",
+            "text_output": scenario_output_dir / "text_output",
+            "pred_route": scenario_output_dir / "pred_route",
+            "pred_speed_wps": scenario_output_dir / "pred_speed_wps",
+        }
+        for path in subdirs.values():
+            path.mkdir(parents=True, exist_ok=True)
+        return subdirs
 
     def _project_and_draw_points(
         self,
@@ -434,7 +437,7 @@ class SimLingoInferenceBaseline:
 
     def _write_text_outputs(
         self,
-        output_dir: Path,
+        output_path: Path,
         text_features: Optional[Dict[str, Any]],
     ) -> None:
         """생성 텍스트를 txt로 저장합니다."""
@@ -449,7 +452,7 @@ class SimLingoInferenceBaseline:
         if tokens:
             text_lines.append("")
             text_lines.append("Tokens: " + " ".join(tokens))
-        (output_dir / "text_output.txt").write_text("\n".join(text_lines), encoding="utf-8")
+        output_path.write_text("\n".join(text_lines), encoding="utf-8")
 
     def run_scene(self, scene_dir: Path, output_dir: Path) -> None:
         """scene_dir의 모든 이미지를 순회하며 추론 결과를 payload 형태로 저장합니다."""
@@ -461,12 +464,12 @@ class SimLingoInferenceBaseline:
         scenario_name = scene_dir.name
         mode_suffix = "action" if self.explain_mode == "action" else "text"
         scenario_output_dir = self._prepare_output_subdir(output_dir, scenario_name, mode_suffix)
+        scenario_subdirs = self._prepare_scenario_subdirs(scenario_output_dir)
         image_paths = sorted(
             [p for p in scene_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
         for image_path in image_paths:
             record_tag = image_path.stem
-            image_output_dir = self._prepare_image_output_dir(scenario_output_dir, record_tag)
             self.recorder.start_recording(record_tag)
             driving_input, meta = self._prepare_driving_input(image_path)
             outputs = self.model(driving_input)
@@ -489,22 +492,31 @@ class SimLingoInferenceBaseline:
                 "mode": self.explain_mode,
                 "attention": attention_maps,
             }
-            payload_path = image_output_dir / f"payload_{mode_suffix}.pt"
+            payload_path = scenario_subdirs["pt"] / f"{record_tag}.pt"
             torch.save(payload, payload_path)
             image_hw = (meta["original_height"], meta["original_width"])
             self._project_and_draw_points(
-                pred_route, image_hw, (255, 0, 0, 255), radius=3, output_path=image_output_dir / "route_overlay.png"
+                pred_route,
+                image_hw,
+                (255, 0, 0, 255),
+                radius=3,
+                output_path=scenario_subdirs["route_overlay"] / f"{record_tag}.png",
             )
             self._project_and_draw_points(
                 pred_speed_wps,
                 image_hw,
                 (0, 200, 0, 255),
                 radius=2,
-                output_path=image_output_dir / "speed_overlay.png",
+                output_path=scenario_subdirs["speed_overlay"] / f"{record_tag}.png",
             )
-            self._write_text_outputs(image_output_dir, text_features)
-            self._write_tensor_txt(pred_route, image_output_dir / "pred_route.txt")
-            self._write_tensor_txt(pred_speed_wps, image_output_dir / "pred_speed_wps.txt")
+            self._write_text_outputs(
+                scenario_subdirs["text_output"] / f"{record_tag}.txt",
+                text_features,
+            )
+            self._write_tensor_txt(pred_route, scenario_subdirs["pred_route"] / f"{record_tag}.txt")
+            self._write_tensor_txt(
+                pred_speed_wps, scenario_subdirs["pred_speed_wps"] / f"{record_tag}.txt"
+            )
 
     def _prepare_driving_input(self, image_path: Path) -> Tuple[DrivingInput, Dict[str, Any]]:
         """단일 이미지를 전처리하여 DrivingInput과 메타 정보를 생성합니다."""

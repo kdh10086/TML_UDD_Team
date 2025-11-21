@@ -36,7 +36,7 @@
 - action 타깃: 액션 토큰이 아니라 **액션 MLP 출력( pred_route 20×2, pred_speed_wps 10×2 )을 곡선으로 근사 → 운동학 함수 → 스칼라 \(y_t\)**. kinematic metric은 플러그인(curv_energy/acc_energy/progress/brake/jerk 등).
 - text 타깃: 생성 텍스트 로짓에서 전략(max/last/index)으로 스칼라를 선택해 `backward` 수행.
 - payload 구조: `target_scalar`, `target_info`, `attention`(attn+grad per block), `meta`(원본 H/W, 이미지 토큰 수), `text_outputs`(token ids/scores/strings/decoded) 등이 포함됨. Generic/다른 메소드에서 재추론 없이 활용 가능해야 함.
-- 출력 포맷: scene 단위로 `sceneName_{mode}_{YYMMDD_HHMM}/` 디렉토리가 생성되고, 그 안에 각 입력 이미지 스템 이름의 서브폴더가 있음. 각 서브폴더에는 `payload_{mode}.pt`, pred_route 투영점만을 담은 투명 PNG(`route_overlay.png`), pred_speed_wps 투영점만을 담은 투명 PNG(`speed_overlay.png`), `text_output.txt`, `pred_route.txt`(20×2), `pred_speed_wps.txt`(10×2)가 저장됨.
+- 출력 포맷: scene 단위로 `sceneName_{mode}_{YYMMDD_HHMM}/` 생성되고, 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`)가 있음. 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`). PNG는 투명 배경 위에 투영점만 표시.
 - Generic Attention: 현재 텍스트 모드 구현본이 `experiment/generic_attention_baseline.py`에 있으며, **앞으로 action/text 공용으로 `.pt`를 입력 받아 Chefer rule 5/6로 relevance만 누적→히트맵 저장**하도록 리팩터링 필요.
 - ViT 시각화: `experiment/vit_raw_attention.py`, `experiment/vit_attention_rollout.py`, `experiment/vit_attention_flow.py`가 구현 완료(현재는 직접 추론 실행 방식).
 - 통합 실행/데이터 루프: `run_all_methods.py` 등 통합 스크립트와 scene 데이터 준비는 미완.
