@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from experiment.overlay_utils import overlay_trajectories, resolve_overlay_dirs
 from experiment.simlingo_inference_baseline import (
     DEFAULT_CHECKPOINT_PATH,
     DEFAULT_CONFIG_PATH,
@@ -44,6 +45,7 @@ class VisionAttentionRollout(SimLingoInferenceBaseline):
         start_layer: int = 0,
         colormap: str = "JET",
         alpha: float = 0.5,
+        trajectory_overlay_root: Optional[Path] = None,
     ) -> None:
         super().__init__(
             config_path=config_path,
@@ -64,6 +66,7 @@ class VisionAttentionRollout(SimLingoInferenceBaseline):
         if not (0.0 <= alpha <= 1.0):
             raise ValueError("alpha must be between 0 and 1.")
         self.alpha = alpha
+        self.trajectory_overlay_root = trajectory_overlay_root
 
     def generate_scene_heatmaps(self, scene_dir: Path, output_dir: Path, suffix: str = "vit_rollout") -> None:
         scene_dir = Path(scene_dir)
@@ -72,13 +75,23 @@ class VisionAttentionRollout(SimLingoInferenceBaseline):
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
         scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir.name, suffix)
+        images_dir = scene_dir / "images"
+        image_root = images_dir if images_dir.exists() else scene_dir
         image_paths = sorted(
-            [p for p in scene_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+            [p for p in image_root.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
+        route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
         for image_path in image_paths:
-            self._process_single_image(image_path, scenario_output_dir, suffix)
+            self._process_single_image(image_path, scenario_output_dir, suffix, route_dir, speed_dir)
 
-    def _process_single_image(self, image_path: Path, output_dir: Path, suffix: str) -> Path:
+    def _process_single_image(
+        self,
+        image_path: Path,
+        output_dir: Path,
+        suffix: str,
+        route_overlay_dir: Optional[Path],
+        speed_overlay_dir: Optional[Path],
+    ) -> Path:
         record_tag = image_path.stem
         self.recorder.start_recording(record_tag)
         driving_input, meta = self._prepare_driving_input(image_path)
@@ -88,7 +101,7 @@ class VisionAttentionRollout(SimLingoInferenceBaseline):
         rollout = self._compute_rollout(attention_maps)
         token_scores = self._extract_image_scores(rollout, meta["num_total_image_tokens"])
         heatmap = self._scores_to_heatmap(token_scores, meta)
-        overlay = self._render_overlay(image_path, heatmap)
+        overlay = self._render_overlay(image_path, heatmap, record_tag, route_overlay_dir, speed_overlay_dir)
         output_path = output_dir / f"{image_path.stem}_{suffix}.png"
         Image.fromarray(overlay).save(output_path)
         return output_path
@@ -160,10 +173,18 @@ class VisionAttentionRollout(SimLingoInferenceBaseline):
         heatmap = F.interpolate(scores, size=(H, W), mode="bilinear", align_corners=False)
         return heatmap.squeeze(0).squeeze(0)
 
-    def _render_overlay(self, image_path: Path, heatmap: torch.Tensor) -> np.ndarray:
+    def _render_overlay(
+        self,
+        image_path: Path,
+        heatmap: torch.Tensor,
+        record_tag: str,
+        route_overlay_dir: Optional[Path],
+        speed_overlay_dir: Optional[Path],
+    ) -> np.ndarray:
         heatmap_np = heatmap.detach().cpu().numpy()
         image = np.array(Image.open(image_path).convert("RGB"), dtype=np.float32) / 255.0
         blended = show_cam_on_image(image, heatmap_np, self.colormap_code, self.alpha)
+        blended = overlay_trajectories(blended, record_tag, route_overlay_dir, speed_overlay_dir)
         return np.uint8(255 * blended)
 
 
@@ -189,6 +210,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--colormap", type=str, default="JET", help="OpenCV colormap name (JET, VIRIDIS 등).")
     parser.add_argument("--alpha", type=float, default=0.5, help="Overlay blend ratio.")
     parser.add_argument("--suffix", type=str, default="vit_rollout", help="Output filename suffix.")
+    parser.add_argument(
+        "--trajectory_overlay_root",
+        type=Path,
+        default=None,
+        help="Path to Sim-Lingo inference output (expects route_overlay/speed_overlay subdirs).",
+    )
     return parser.parse_args()
 
 
@@ -202,6 +229,7 @@ def main() -> None:
         start_layer=args.start_layer,
         colormap=args.colormap,
         alpha=args.alpha,
+        trajectory_overlay_root=args.trajectory_overlay_root,
     )
     runner.generate_scene_heatmaps(args.scene_dir, args.output_dir, suffix=args.suffix)
 
