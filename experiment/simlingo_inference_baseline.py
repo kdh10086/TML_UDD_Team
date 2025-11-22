@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import shutil
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -19,10 +20,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import hydra
+import numpy as np
 import torch
 from hydra.utils import to_absolute_path
 from omegaconf import OmegaConf
-from PIL import Image
+from PIL import Image, ImageDraw
 from transformers import AutoConfig, AutoProcessor
 
 # 어떤 위치에서 실행해도 external/simlingo 모듈을 불러올 수 있도록 경로 추가
@@ -34,14 +36,17 @@ if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
 from simlingo_training.models.driving import DrivingModel
 from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
 from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
-from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics
+from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics, project_points
 
 DEFAULT_CONFIG_PATH = Path("checkpoints/simlingo/simlingo/.hydra/config.yaml")  # 기본 Hydra config
 DEFAULT_CHECKPOINT_PATH = Path("checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt")  # 기본 ckpt
-DEFAULT_SCENE_DIR = Path("data/scene01")  # 기본 입력 이미지 디렉토리
+DEFAULT_SCENE_DIR = Path("data/DADA-2000-Core/sorted_index/4/001")  # 기본 입력 시나리오 디렉토리(하위 images 사용)
 DEFAULT_OUTPUT_DIR = Path("experiment_outputs/simlingo_inference")  # 기본 출력 디렉토리
 DEFAULT_EXPLAIN_MODE = os.environ.get("SIMLINGO_EXPLAIN_MODE", "action")  # action/text 모드 기본값
 DEFAULT_KINEMATIC_METRIC = "curv_energy"  # 운동학 함수 기본값
+DEFAULT_IMAGE_SIZE = 224  # 입력 리사이즈 (기본 448 : 메모리 절감 필요 시 336 / 228 - (우선순위 1))
+DEFAULT_MAX_PATCHES = 2  # dynamic_preprocess max_num (기본 2 : 메모리 절감 필요 시 1 - (우선순위 2))
+DEFAULT_USE_PREV_SPEED = False  # 이전 프레임 예측 속도를 다음 프롬프트/vehicle_speed에 주입할지 여부
 
 EPS = 1e-6
 DELTA_S = 1.0
@@ -250,6 +255,9 @@ class SimLingoInferenceBaseline:
         text_token_strategy: str = "max",
         text_token_index: int = -1,
         kinematic_metric: str = DEFAULT_KINEMATIC_METRIC,
+        image_size: int = DEFAULT_IMAGE_SIZE,
+        max_patches: int = DEFAULT_MAX_PATCHES,
+        use_prev_speed: bool = DEFAULT_USE_PREV_SPEED,
     ) -> None:
         config_path = config_path or DEFAULT_CONFIG_PATH
         self.config_path = Path(config_path)
@@ -272,6 +280,9 @@ class SimLingoInferenceBaseline:
         if kinematic_metric not in KINEMATIC_METRICS:
             raise ValueError(f"Unsupported kinematic metric: {kinematic_metric}")
         self.kinematic_metric = kinematic_metric
+        self.image_size = image_size
+        self.max_patches = max_patches
+        self.use_prev_speed = use_prev_speed
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(
             self.cfg.model.vision_model.variant, trust_remote_code=True
@@ -295,19 +306,22 @@ class SimLingoInferenceBaseline:
             }
         )
         self.tokenizer.padding_side = "left"
-        self.transform = build_transform(input_size=448)
+        self.transform = build_transform(input_size=self.image_size)
         self.T = 1
-        self.num_image_token = self._compute_num_image_tokens(self.cfg.model.vision_model.variant)
+        self.num_image_token = self._compute_num_image_tokens(
+            self.cfg.model.vision_model.variant, image_size_override=self.image_size
+        )
         self.model = self._build_model()
         self.recorder = AttentionRecorder()
         self._register_attention_hooks()
 
-    def _compute_num_image_tokens(self, encoder_variant: str) -> int:
+    def _compute_num_image_tokens(self, encoder_variant: str, image_size_override: Optional[int] = None) -> int:
         """InternVL2 비전 인코더 설정에서 이미지 토큰(패치 수)을 계산합니다."""
         cfg = AutoConfig.from_pretrained(encoder_variant, trust_remote_code=True)
-        image_size = cfg.force_image_size or cfg.vision_config.image_size
+        image_size = image_size_override or cfg.force_image_size or cfg.vision_config.image_size
         patch_size = cfg.vision_config.patch_size
-        return int((image_size // patch_size) ** 2 * (cfg.downsample_ratio ** 2))
+        downsample = getattr(cfg, "downsample_ratio", getattr(cfg.vision_config, "downsample_ratio", 1.0))
+        return int((image_size // patch_size) ** 2 * (downsample ** 2))
 
     def _build_model(self) -> DrivingModel:
         """Hydra 설정으로 DrivingModel을 만들고 체크포인트를 불러온 뒤 어텐션 출력을 활성화합니다."""
@@ -350,12 +364,22 @@ class SimLingoInferenceBaseline:
         for idx, block in enumerate(layers):
             self.recorder.register_module(block, f"language_block_{idx}")
 
-    def _prepare_output_subdir(self, output_root: Path, scenario_name: str, mode_suffix: str) -> Path:
-        """scene-모드-타임스탬프 규칙으로 하위 디렉토리를 만들고 중복 시 숫자 suffix를 붙입니다."""
+    def _build_scenario_name(self, scenario_dir: Path) -> str:
+        """시나리오 경로에서 정렬/원본, city 번호, 시나리오 번호를 추출해 접두어를 만듭니다."""
+        scenario_dir = scenario_dir.resolve()
+        scenario_id = scenario_dir.name
+        city_id = scenario_dir.parent.name if scenario_dir.parent else "unknown"
+        index_type = scenario_dir.parent.parent.name if scenario_dir.parent and scenario_dir.parent.parent else "scene"
+        return f"{index_type}_{city_id}_{scenario_id}"
+
+    def _prepare_output_subdir(self, output_root: Path, scenario_dir: Path, mode_suffix: str) -> Path:
+        """정규화된 시나리오 이름과 모드, 타겟 설정, 타임스탬프 규칙으로 하위 디렉토리를 만듭니다."""
         output_root = Path(output_root)
         output_root.mkdir(parents=True, exist_ok=True)
+        scenario_name = self._build_scenario_name(scenario_dir)
         timestamp = datetime.now().strftime("%y%m%d_%H%M")
-        base_name = f"{scenario_name}_{mode_suffix}_{timestamp}"
+        detail = self.kinematic_metric if mode_suffix == "action" else self.text_token_strategy
+        base_name = f"{scenario_name}_{mode_suffix}_{detail}_{timestamp}"
         candidate = output_root / base_name
         counter = 1
         while candidate.exists():
@@ -364,24 +388,127 @@ class SimLingoInferenceBaseline:
         candidate.mkdir(parents=True, exist_ok=False)
         return candidate
 
+    def _prepare_scenario_subdirs(self, scenario_output_dir: Path) -> Dict[str, Path]:
+        """시나리오 단위 하위 디렉토리(파일 유형별)를 모두 생성합니다."""
+        subdirs = {
+            "pt": scenario_output_dir / "pt",
+            "route_overlay": scenario_output_dir / "route_overlay",
+            "speed_overlay": scenario_output_dir / "speed_overlay",
+            "text_output": scenario_output_dir / "text_output",
+            "pred_route": scenario_output_dir / "pred_route",
+            "pred_speed_wps": scenario_output_dir / "pred_speed_wps",
+            "input_images": scenario_output_dir / "input_images",
+        }
+        for path in subdirs.values():
+            path.mkdir(parents=True, exist_ok=True)
+        return subdirs
+
+    def _project_and_draw_points(
+        self,
+        points: Optional[torch.Tensor],
+        image_hw: Tuple[int, int],
+        color: Tuple[int, int, int, int],
+        radius: int,
+        output_path: Path,
+    ) -> None:
+        """예측 궤적을 원본 해상도에 맞춰 투영한 뒤 투명 배경 PNG로 저장합니다."""
+        if points is None:
+            return
+        points = points.detach().to("cpu")
+        if points.numel() == 0:
+            return
+        if points.dim() == 3:
+            points = points.squeeze(0)
+        if points.dim() != 2 or points.shape[1] != 2:
+            return
+        points = points.float()
+        H, W = image_hw
+        K = get_camera_intrinsics(W, H, 110)
+        if torch.is_tensor(K):
+            K_np = K.detach().cpu().numpy()
+        else:
+            K_np = np.asarray(K)
+        try:
+            projected = project_points(points.numpy(), K_np)
+        except Exception:
+            return
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        for coord in projected:
+            x, y = float(coord[0]), float(coord[1])
+            if not np.isfinite([x, y]).all():
+                continue
+            xi, yi = int(round(x)), int(round(y))
+            if 0 <= xi < W and 0 <= yi < H:
+                draw.ellipse((xi - radius, yi - radius, xi + radius, yi + radius), fill=color)
+        overlay.save(output_path)
+
+    @staticmethod
+    def _write_tensor_txt(tensor: Optional[torch.Tensor], output_path: Path) -> None:
+        """텐서를 CPU로 옮겨 txt로 저장합니다."""
+        if tensor is None:
+            return
+        tensor_cpu = tensor.detach().to("cpu")
+        if tensor_cpu.dim() == 3:
+            tensor_cpu = tensor_cpu.squeeze(0)
+        data = tensor_cpu.tolist()
+        lines: List[str] = []
+        for row in data:
+            if isinstance(row, (list, tuple)):
+                lines.append(" ".join(f"{float(x):.6f}" for x in row))
+            else:
+                lines.append(f"{float(row):.6f}")
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _write_text_outputs(
+        self,
+        output_path: Path,
+        text_features: Optional[Dict[str, Any]],
+        language_fallback: Optional[Any] = None,
+    ) -> None:
+        """생성 텍스트를 txt로 저장합니다. 기본은 모델이 생성한 문장, 없으면 fallback."""
+        decoded = ""
+        tokens: List[str] = []
+        if text_features is not None:
+            decoded = text_features.get("decoded_text") or ""
+            tokens = text_features.get("token_strings") or []
+        if not decoded and language_fallback:
+            if isinstance(language_fallback, (list, tuple)):
+                decoded = " ".join(str(x) for x in language_fallback if x)
+            else:
+                decoded = str(language_fallback)
+        text_lines = []
+        if decoded:
+            text_lines.append(decoded)
+        if tokens:
+            text_lines.append("")
+            text_lines.append("Tokens: " + " ".join(tokens))
+        output_path.write_text("\n".join(text_lines), encoding="utf-8")
+
     def run_scene(self, scene_dir: Path, output_dir: Path) -> None:
-        """scene_dir의 모든 이미지를 순회하며 추론 결과를 payload 형태로 저장합니다."""
+        """시나리오 디렉토리(하위 images/)의 모든 이미지를 순회하며 추론 결과를 저장합니다."""
         scene_dir = Path(scene_dir)
         output_dir = Path(output_dir)
         if not scene_dir.exists():
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        scenario_name = scene_dir.name
+        images_dir = scene_dir / "images"
+        if not images_dir.exists():
+            raise FileNotFoundError(f"'images' subdirectory not found under {scene_dir}")
         mode_suffix = "action" if self.explain_mode == "action" else "text"
-        scenario_output_dir = self._prepare_output_subdir(output_dir, scenario_name, mode_suffix)
+        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, mode_suffix)
+        scenario_subdirs = self._prepare_scenario_subdirs(scenario_output_dir)
         image_paths = sorted(
-            [p for p in scene_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+            [p for p in images_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
+        prev_speed_est: Optional[float] = None
         for image_path in image_paths:
             record_tag = image_path.stem
             self.recorder.start_recording(record_tag)
-            driving_input, meta = self._prepare_driving_input(image_path)
+            current_speed = prev_speed_est if (self.use_prev_speed and prev_speed_est is not None) else 0.0
+            driving_input, meta = self._prepare_driving_input(image_path, current_speed=current_speed)
             outputs = self.model(driving_input)
+            pred_speed_wps, pred_route, _ = outputs
             text_features = self._gather_text_features()
             target_scalar, target_meta = self._compute_target_scalar(outputs, text_features)
             if target_scalar is None:
@@ -400,14 +527,48 @@ class SimLingoInferenceBaseline:
                 "mode": self.explain_mode,
                 "attention": attention_maps,
             }
-            output_path = scenario_output_dir / f"{image_path.stem}_{mode_suffix}.pt"
-            torch.save(payload, output_path)
+            payload_path = scenario_subdirs["pt"] / f"{record_tag}.pt"
+            torch.save(payload, payload_path)
+            image_hw = (meta["original_height"], meta["original_width"])
+            self._project_and_draw_points(
+                pred_route,
+                image_hw,
+                (255, 0, 0, 255),
+                radius=3,
+                output_path=scenario_subdirs["route_overlay"] / f"{record_tag}.png",
+            )
+            self._project_and_draw_points(
+                pred_speed_wps,
+                image_hw,
+                (0, 200, 0, 255),
+                radius=2,
+                output_path=scenario_subdirs["speed_overlay"] / f"{record_tag}.png",
+            )
+            self._write_text_outputs(
+                scenario_subdirs["text_output"] / f"{record_tag}.txt",
+                text_features,
+                language_fallback=outputs[-1],
+            )
+            self._write_tensor_txt(pred_route, scenario_subdirs["pred_route"] / f"{record_tag}.txt")
+            self._write_tensor_txt(
+                pred_speed_wps, scenario_subdirs["pred_speed_wps"] / f"{record_tag}.txt"
+            )
+            if self.use_prev_speed:
+                new_speed = self._estimate_speed_from_wps(pred_speed_wps)
+                if new_speed is not None:
+                    prev_speed_est = new_speed
+            # 입력 원본 이미지도 정리용으로 복사
+            shutil.copy2(image_path, scenario_subdirs["input_images"] / image_path.name)
 
-    def _prepare_driving_input(self, image_path: Path) -> Tuple[DrivingInput, Dict[str, Any]]:
+    def _prepare_driving_input(
+        self, image_path: Path, current_speed: float = 0.0
+    ) -> Tuple[DrivingInput, Dict[str, Any]]:
         """단일 이미지를 전처리하여 DrivingInput과 메타 정보를 생성합니다."""
         processed_image, num_patches, orig_hw = self._preprocess_image(image_path)
         placeholder_batch_list: List[dict] = []
-        prompt_str = "Current speed: 0 m/s. Predict the waypoints."
+        prompt_str = (
+            f"Current speed: {current_speed:.1f} m/s. What should the ego vehicle do next? Provide a short commentary."
+        )
         lang_label = self._build_language_label(prompt_str, placeholder_batch_list, num_patches)
         camera_intrinsics = get_camera_intrinsics(orig_hw[1], orig_hw[0], 110).unsqueeze(0).unsqueeze(0)
         camera_extrinsics = get_camera_extrinsics().unsqueeze(0).unsqueeze(0)
@@ -416,7 +577,7 @@ class SimLingoInferenceBaseline:
             image_sizes=torch.tensor([[orig_hw[0], orig_hw[1]]], dtype=torch.float32).to(self.device),
             camera_intrinsics=camera_intrinsics.to(self.device),
             camera_extrinsics=camera_extrinsics.to(self.device),
-            vehicle_speed=torch.zeros(1, 1, dtype=torch.float32, device=self.device),
+            vehicle_speed=torch.tensor([[current_speed]], dtype=torch.float32, device=self.device),
             target_point=torch.zeros(1, 2, dtype=torch.float32, device=self.device),
             prompt=lang_label,
             prompt_inference=lang_label,
@@ -537,6 +698,9 @@ class SimLingoInferenceBaseline:
             "decoded_text": decoded_text,
         }
 
+    @staticmethod
+    # 행동 요약은 더 이상 사용하지 않음 (텍스트 출력은 모델 생성/펜싱 fallback만 사용)
+
     def _serialize_text_outputs(self, text_features: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """text_features 텐서를 CPU 리스트로 변환해 저장 가능하도록 만듭니다."""
         if text_features is None:
@@ -553,11 +717,12 @@ class SimLingoInferenceBaseline:
     def _preprocess_image(self, image_path: Path):
         """Sim-Lingo용 동적 전처리를 수행해 패치 텐서를 반환합니다."""
         image = Image.open(image_path).convert("RGB")
+        use_global_img = getattr(self.cfg.model.vision_model, "use_global_img", True)
         images = dynamic_preprocess(
             image,
-            image_size=448,
-            use_thumbnail=self.cfg.model.vision_model.use_global_img,
-            max_num=2,
+            image_size=self.image_size,
+            use_thumbnail=use_global_img,
+            max_num=self.max_patches,
         )
         pixel_values = torch.stack([self.transform(img) for img in images])
         pixel_values = pixel_values.unsqueeze(0)
@@ -694,7 +859,7 @@ def parse_args():
         "--scene_dir",
         type=Path,
         default=DEFAULT_SCENE_DIR,
-        help=f"Directory with input images (default: {DEFAULT_SCENE_DIR})",
+        help=f"Scenario directory containing 'images/' subfolder (default: {DEFAULT_SCENE_DIR})",
     )
     parser.add_argument(
         "--output_dir",
@@ -737,6 +902,23 @@ def parse_args():
         default=DEFAULT_KINEMATIC_METRIC,
         help="Kinematic scalar function to apply on action outputs before backprop.",
     )
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        default=DEFAULT_IMAGE_SIZE,
+        help="Input resize for dynamic_preprocess (reduce for lower GPU memory).",
+    )
+    parser.add_argument(
+        "--max_patches",
+        type=int,
+        default=DEFAULT_MAX_PATCHES,
+        help="Max number of patches (dynamic_preprocess max_num). Use 1 to reduce GPU memory.",
+    )
+    parser.add_argument(
+        "--use_prev_speed",
+        action="store_true",
+        help="Use previous frame pred_speed_wps to estimate speed for next prompt/vehicle_speed.",
+    )
     return parser.parse_args()
 
 
@@ -752,9 +934,31 @@ def main():
         text_token_strategy=args.text_token_strategy,
         text_token_index=args.text_token_index,
         kinematic_metric=args.kinematic_metric,
+        image_size=args.image_size,
+        max_patches=args.max_patches,
+        use_prev_speed=args.use_prev_speed,
     )
     runner.run_scene(args.scene_dir, args.output_dir)
 
 
 if __name__ == "__main__":
     main()
+    @staticmethod
+    def _estimate_speed_from_wps(pred_speed_wps: Optional[torch.Tensor]) -> Optional[float]:
+        """pred_speed_wps로부터 근사 속도를 계산한다. (m/s, 이상치 클램프)"""
+        if pred_speed_wps is None:
+            return None
+        speed = pred_speed_wps.detach().to("cpu").float()
+        if speed.dim() == 3:
+            speed = speed.squeeze(0)
+        if speed.numel() == 0 or speed.dim() != 2 or speed.shape[0] < 2:
+            return None
+        deltas = speed[1:] - speed[:-1]
+        norms = deltas.norm(dim=-1) / DELTA_T
+        if norms.numel() == 0:
+            return None
+        est = norms[:3].mean().item() if norms.numel() >= 3 else norms.mean().item()
+        if not np.isfinite(est):
+            return None
+        est = max(0.0, min(est, 30.0))  # 0~30 m/s 범위로 클램프
+        return est

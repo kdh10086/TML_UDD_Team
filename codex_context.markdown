@@ -29,6 +29,31 @@
 
 ---
 
+## 0.1 현재 구현 상태 / 부트업 체크리스트
+
+- 데이터: `data/DADA-2000-Core/sorted_index/` 아래에 DADA-2000-Core 시나리오들이 준비됨(테스트는 여기 시나리오 사용). Scene 5개 선정·크롭 규약 확정은 여전히 필요.
+- 추론: `experiment/simlingo_inference_baseline.py` 완성. action/text 모드에서 **추론 시점에 kinematic/text 스칼라를 만들고 `backward()`까지 수행**하여 각 블록 어텐션+gradient를 `.pt` payload로 저장. 기본 경로는 `checkpoints/simlingo/simlingo/.hydra/config.yaml` / `checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt`(약 9GB, LFS).
+- action 타깃: 액션 토큰이 아니라 **액션 MLP 출력( pred_route 20×2, pred_speed_wps 10×2 )을 곡선으로 근사 → 운동학 함수 → 스칼라 \(y_t\)**. kinematic metric은 플러그인(curv_energy/acc_energy/progress/brake/jerk 등).
+- text 타깃: 생성 텍스트 로짓에서 전략(max/last/index)으로 스칼라를 선택해 `backward` 수행.
+- payload 구조: `target_scalar`, `target_info`, `attention`(attn+grad per block), `meta`(원본 H/W, 이미지 토큰 수), `text_outputs`(token ids/scores/strings/decoded) 등이 포함됨. Generic/다른 메소드에서 재추론 없이 활용 가능해야 함.
+- 입력 규약: `scene_dir`는 시나리오 루트(`.../sorted_index/<city>/<scenario>`)를 가리키며, 스크립트가 하위 `images/`에서 프레임을 읽는다. 프롬프트는 commentary 모드 고정(`Current speed: {speed} m/s. What should the ego vehicle do next? Provide a short commentary.`). 기본은 모든 프레임에 0 m/s를 입력·표기하며, `--use_prev_speed`를 켜면 이전 프레임 `pred_speed_wps`에서 속도를 근사(0~30 m/s 클램프, 3구간 평균)해 다음 프롬프트/`vehicle_speed`에 주입한다.
+- 출력 포맷: scene 단위로 `sorted_index(or original_index)_<city>_<scenario>_{mode}_{detail}_{YYMMDD_HHMM}/` 생성되고, 중복 시 `_1` 등 suffix로 덮어쓰기 방지. 여기서 `{detail}`은 action 모드면 kinematic metric 이름, text 모드면 text_token_strategy 이름. 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`, `input_images/`)가 있으며, 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`, `input_images/frame001.png`). PNG는 투명 배경 위에 투영점만 표시.
+- 전처리: `dynamic_preprocess` 호출 시 `use_global_img`가 config에 없을 경우 기본값으로 `True`를 사용하도록 방어 로직 추가.
+- 메모리 튜닝: CLI에서 `--image_size`(기본 448), `--max_patches`(기본 2)를 내려서 GPU 메모리를 줄일 수 있음. 필요 시 `--image_size 336 --max_patches 1` 등으로 실행.
+- 기본 해상도: 8GB VRAM 노트북 환경을 고려해 기본 `--image_size`는 224로 낮춘 상태이며, 필요 시 인자로 올려서 사용.
+- 의존성: 추론 실행에 필요한 패키지는 루트 `requirements.txt`에 정리되어 있음. 의존성 오류가 나면 `pip install --user -r requirements.txt`로 설치.
+- 오버레이/텍스트: pred_route/pred_speed_wps는 float32로 변환 후 투영해 오버레이 PNG를 생성. text_output은 모델 생성 텍스트(`text_outputs`가 있으면 이를, 없으면 `language` 필드 fallback)만 기록하며, 추가 LLM 후처리나 수치 템플릿 요약은 하지 않는다.
+- **속도 입력 문제(중대)**: SimLingo는 입력으로 이미지 + 현재 속도를 요구하나 DADA-2000에는 속도 데이터가 없음. 현재는 기본 0 m/s(또는 `--use_prev_speed`로 이전 예측 속도 주입)로 추론하지만, 이는 실제 상황과 불일치해 심각한 오판을 유발할 수 있음. 팀 차원 결정 필요. 후보:
+  1) 시나리오 영상을 Gemini 등 LLM에 보내 초반 속도만 추정, 이후는 pred_speed_wps 기반 재귀 주입(초기값 검토 필요, 누적 오차 위험).
+  2) 시나리오 영상을 LLM에 보내 프레임별 속도 추정 후 각 프레임에 주입(실험 변수로 외부 모델 예측이 들어감, 비용/지연·정확도 리스크).
+  3) 속도 포함된 다른 데이터셋으로 전환(사고/GT 히트맵 여부는 재고, 속도+이미지 우선).
+  4) CARLA에서 사고 시나리오 자체 생성 후 추론(속도 정확, SimLingo 학습 분포와 일치, 변인 통제 우수하지만 구축 비용/VRAM·환경 설정 부담).
+- Generic Attention: 현재 텍스트 모드 구현본이 `experiment/generic_attention_baseline.py`에 있으며, **앞으로 action/text 공용으로 `.pt`를 입력 받아 Chefer rule 5/6로 relevance만 누적→히트맵 저장**하도록 리팩터링 필요.
+- ViT 시각화: `experiment/vit_raw_attention.py`, `experiment/vit_attention_rollout.py`, `experiment/vit_attention_flow.py`가 구현 완료(현재는 직접 추론 실행 방식).
+- 통합 실행/데이터 루프: `run_all_methods.py` 등 통합 스크립트와 scene 데이터 준비는 미완.
+
+---
+
 ## 1. 실험 계획 (Experiment Plan)
 
 1.  기말 전까지 우선 목표:
@@ -46,6 +71,7 @@
 ### a. Scene 구간 5개 찾기 (Phase 1, 최우선)
 
 - 시나리오를 여러 번 돌려보면서 **실험에 사용할 “Scene 구간” 5개**를 선정한다.
+- 현재 테스트 데이터 루트: `data/DADA-2000-Core/sorted_index/` (DADA-2000-Core 정렬 시나리오). 여기에서 Scene 5개를 선정하고 크롭/리사이즈 규약을 확정한다.
 - 각 Scene 구간은:
   - **히트맵이 시각적으로 의미 있고 아름답게** 나와야 한다.
   - **사고 직전 일반 상태**가 잠깐 포함되어야 한다.
@@ -101,37 +127,34 @@
 
 Generic Attention 논문 코드(공개 구현 등)를 가져와 분석 후 다음을 수행한다.
 
-1. **히트맵 이미지 생성 로직 추가**
-   - 마지막 단계에서 relevance map을 이미지 히트맵으로 변환하고,
-   - 결과 디렉토리에 PNG 등으로 저장하는 기능을 추가한다.
-2. **입력 이미지 개수 N개에 대한 반복 처리**
-   - 입력 `scene_dir`의 이미지 N개 모두에 대해 relevance를 계산하여
-   - N개의 히트맵 이미지를 저장한다.
-3. **\(y_t\) 정의 부분 모듈화**
-   - Generic Attention 내부에서 사용하는 target scalar \(y_t\)를
-     - 함수/콜백 형태로 외부에서 주입할 수 있도록 모듈화한다.
-   - 예: `target_fn(outputs, internal_states) -> scalar y_t`
-   - 이 target_fn을 바꿔 끼움으로써 Ours / 텍스트 방식 메소드를 분기한다.
+1. **입력은 Sim-Lingo 추론 출력 `.pt`**  
+   - `simlingo_inference_baseline.py`가 저장한 payload(`attention`의 attn+grad, `target_info`, `meta`, `text_outputs`)를 로딩한다.  
+   - 이미 추론 시 `y_t`를 만들고 `backward()`를 수행했으므로, 모델 재실행이나 스칼라 재계산을 하지 않는다.
+2. **Chefer rule 5/6로 relevance 누적 후 히트맵 저장**  
+   - 언어/비전 블록별 attn·grad를 활용해 relevance matrix를 만들고, 이미지 토큰 위치로 투영 후 PNG 저장.  
+   - action/text를 동일 코드 경로로 처리하되, target/토큰 위치 정보는 payload에 기록된 `mode`/`target_info`/`text_outputs`/`meta`를 사용한다.
+3. **입력 세트 반복 처리**  
+   - `.pt` 폴더 내 모든 파일에 대해 relevance→히트맵을 생성한다.
 
 #### c-2. 고정된 입출력 규칙
 
 모든 메소드에서 통일해야 하는 규칙:
 
 - **입력(Input)**  
-  - `scene_dir: str` — 장면 구간 이미지들이 들어있는 디렉토리 경로 (N개)
+  - `pt_dir: str` — `simlingo_inference_baseline.py`가 생성한 `.pt` 파일들이 들어있는 디렉토리 (한 scene에 대한 추론 결과)
 - **출력(Output)**  
   - 히트맵 이미지들이 들어있는 **결과 디렉토리 생성 (N개)**  
   - `output_dir: str` — 필요한 경우 자동 생성
 
 메소드 시그니처 예시:
 
-- `generate_heatmaps_generic_ours(scene_dir: str, output_dir: str, ...) -> None`
-- `generate_heatmaps_generic_text(scene_dir: str, output_dir: str, ...) -> None`
+- `generate_heatmaps_generic_ours(pt_dir: str, output_dir: str, ...) -> None`
+- `generate_heatmaps_generic_text(pt_dir: str, output_dir: str, ...) -> None`
 
 #### c-3. 두 메소드
 
 1. **Ours (action-based \(y_t\))**
-   - Sim-Lingo 액션 토큰 → 경로(trajectory) \(p\) 또는 \(w\) → 운동학 스칼라 함수 → \(y_t\)
+   - Sim-Lingo 액션 헤드 MLP 출력(pred_route \(p\), pred_speed_wps \(w\)) → 경로 곡선 근사 → 운동학 스칼라 함수 → \(y_t\)
    - 운동학 스칼라 함수는 **플러그인 방식**으로 붙였다 뗐다 가능해야 한다.
      - 여러 후보 함수(아래 “운동함수 후보” 참조)를 빠르게 교체하며 실험 가능해야 함.
 
@@ -319,6 +342,13 @@ Generic Attention 논문 코드(공개 구현 등)를 가져와 분석 후 다�
 > - 횡방향 안전 여유 → \( g_\text{lat-risk} \)
 > 등을 각각 별도의 \(y_t\) 로 두고 Generic Attention을 수행할 수 있다.
 
+### 3.3 운동학 함수 그래디언트 소멸 방지 팁
+
+- 문제: 곡률/가속도 에너지처럼 입력이 0이면 \( \partial g / \partial (\text{입력}) = 0 \) 이 되어 relevance가 죽는다. 상수 바이어스를 더해도 기울기는 동일하게 0이다.
+- ReLU 완화: \(\text{ReLU}(x) \rightarrow \tau \log(1+\exp(x/\tau))\) (softplus)로 교체하면 0 근처에도 기울기가 남는다. 브레이크/진행량 메트릭에 적용.
+- 작은 1차 항 추가: \(g(x)=x^2 + \lambda x\) 또는 \(x^2 + \lambda\,\text{softplus}(x)\) 형태로 정의해 \(x=0\)에서도 기울기 \(\approx \lambda\)를 확보한다. \(\lambda\)는 1e-4~1e-3 수준으로 작게.
+- 보조 메트릭 혼합: 직진·정지 구간에서 주 메트릭이 0이면 \(g = \alpha g_\text{curv} + (1-\alpha) g_\text{progress}\) 처럼 진행/속도 등 보조 항을 섞어 기울기를 유지한다.
+
 ---
 
 ## 4. 작업 우선순위 및 역할 분담
@@ -413,14 +443,12 @@ Phase 1이 완료되었다고 가정하면:
 
 1. **우리는 “policy-to-vision”이 아니라 “action-to-vision” 설명을 목표로 한다.**
    - input 이미지 -> simlingo 추론 -> Sim-Lingo 액션 토큰 → trajectory → kinematic scalar \(y_t\) → Transformer-MM-Explainability → vision relevance map → heatmap
-2. 모든 설명 메소드는 **동일한 입출력 규약**을 가진다.
-   - 입력: `scene_dir` (이미지 디렉토리)
-   - 출력: `output_dir` (히트맵 디렉토리)
-3. Sim-Lingo 추론 로직은 **한 곳(run_inference 등)에만 구현**하고, 모든 메소드는 이 모듈을 통해 토큰/trajectory를 가져온다.
-4. 운동학 함수(종방향/횡방향)는 **플러그인/모듈형 구조**로 구현하여 다양한 \(y_t\)를 빠르게 바꿔가며 실험할 수 있어야 한다.
+2. 추론/설명 I/F: `simlingo_inference_baseline.py`는 `scene_dir`를 입력받아 `.pt` payload를 만든다. Generic Attention 등은 이 `.pt`를 입력(`pt_dir`)으로 받아 히트맵을 만든다. ViT/다른 방법도 가능하면 공통 추론 출력을 재사용한다.
+3. Sim-Lingo 추론 로직은 **한 곳(run_inference 등)에만 구현**하고, 모든 메소드는 이 모듈의 출력(토큰/trajectory/attention/grad/텍스트)을 사용한다.
+4. 운동학 함수(종방향/횡방향)는 **플러그인/모듈형 구조**로 구현하되, 0 부근 기울기 소멸을 피하기 위해 softplus/작은 1차 항/보조 메트릭 혼합 등을 활용한다.
 5. 최종적으로 `run_all_methods.py` 같은 스크립트에서 **원터치 실행**으로 5개 메소드의 히트맵을 모두 생성할 수 있도록 해야 한다.
+6. 코드 변경 시, 본 문서(`codex_context.markdown`)에 적힌 맥락과 달라진 부분이 있으면 최신 맥락에 맞게 필요한 부분만 업데이트한다(내용 전체 덮어쓰기·삭제 등 급진적 변경은 피하고, 차이 나는 부분만 신중히 보정).
 
 기본 언어는 한국어로 하며, 정중하고 신중한 말투를 사용해야한다.
 이 파일의 내용은 **코드 어시스턴트에게 주입되는 상시 컨텍스트**로 사용되며,  
 레포지토리 내 모든 구현은 이 맥락과 규약을 따르는 것을 기본 전제로 한다.
-

@@ -9,3 +9,4 @@
 [submodule "checkpoints/simlingo"]
 	path = checkpoints/simlingo
 	url = https://huggingface.co/RenzKa/simlingo
+
