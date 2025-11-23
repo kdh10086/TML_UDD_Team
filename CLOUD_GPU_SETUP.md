@@ -115,8 +115,9 @@ git lfs clone https://huggingface.co/RenzKa/simlingo checkpoints/simlingo/simlin
 ### 샘플 데이터셋(Google Drive)
 ```bash
 python3 -m pip install --upgrade gdown
+mkdir -p data && cd data
 gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
-mkdir -p data && unzip -o sample_dataset.zip -d data
+unzip -o sample_dataset.zip
 ```
 
 ## 5) 데이터 배치
