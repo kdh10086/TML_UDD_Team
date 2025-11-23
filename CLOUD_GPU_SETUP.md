@@ -132,18 +132,32 @@ data/<dataset>/<scenario>/
 - 서브디렉토리명이 다르면 `--frames_subdir/--speed_subdir`로 지정.
 
 ## 6) Sim-Lingo 추론 실행
-```bash
-PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
-  --scene_dir data/sample/01 \
-  --output_dir experiment_outputs/simlingo_inference \
-  --target_mode auto \
-  --explain_mode action \
-  --text_token_strategy max \
-  --text_token_index -1 \
-  --kinematic_metric curv_energy \
-  --image_size 448 \
-  --max_patches 2
-```
+- 단일 GPU 실행 예:
+  ```bash
+  PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
+    --scene_dir data/sample/01 \
+    --output_dir experiment_outputs/simlingo_inference \
+    --target_mode auto \
+    --explain_mode action \
+    --text_token_strategy max \
+    --text_token_index -1 \
+    --kinematic_metric curv_energy \
+    --image_size 448 \
+    --max_patches 2
+  ```
+- 멀티 GPU(예: H100 4장, 시나리오 4개 라운드로빈 분배):
+  ```bash
+  python -m experiment.simlingo_inference_baseline \
+    --gpu_ids 0,1,2,3 \
+    --scene_dirs data/sample/01 data/sample/02 data/sample/03 data/sample/04 \
+    --output_dir experiment_outputs/simlingo_inference \
+    --target_mode auto \
+    --explain_mode action \
+    --kinematic_metric curv_energy \
+    --image_size 448 \
+    --max_patches 2
+  ```
+  - `--gpu_ids`를 주면 GPU별 별도 프로세스를 띄워 `--scene_dirs`를 균등 배분합니다.
 - tqdm로 시나리오 단위 진행률 표시.
 - 입력 속도는 `video_garmin_speed`의 m/s를 자동 주입. 없으면 0 m/s 폴백.
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import multiprocessing as mp
 import os
 import shutil
 import sys
@@ -173,6 +174,62 @@ def _parametric_cubic_smoothing_resample(
         + h11 * h * m1
     )
     return resampled.to(dtype=orig_dtype)
+
+
+def _parse_gpu_ids(raw: Optional[str]) -> Optional[List[int]]:
+    """Comma-separated GPU id list string -> List[int]."""
+    if raw is None:
+        return None
+    ids: List[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            raise ValueError(f"Invalid GPU id in --gpu_ids: {part}")
+    return ids or None
+
+
+def _split_scenes_across_gpus(scene_dirs: List[Path], gpu_ids: List[int]) -> List[List[Path]]:
+    """Round-robin assign scene dirs to GPUs."""
+    assignments: List[List[Path]] = [[] for _ in gpu_ids]
+    for idx, scene in enumerate(scene_dirs):
+        assignments[idx % len(gpu_ids)].append(scene)
+    return assignments
+
+
+def _build_runner_kwargs_from_args(args) -> Dict[str, Any]:
+    """Extract constructor kwargs from argparse Namespace."""
+    return {
+        "config_path": args.config,
+        "checkpoint_path": args.checkpoint,
+        "device": args.device,
+        "target_mode": args.target_mode,
+        "explain_mode": args.explain_mode,
+        "text_token_strategy": args.text_token_strategy,
+        "text_token_index": args.text_token_index,
+        "kinematic_metric": args.kinematic_metric,
+        "image_size": args.image_size,
+        "max_patches": args.max_patches,
+        "frames_subdir": args.frames_subdir,
+        "speed_subdir": args.speed_subdir,
+        "use_spline": args.use_spline,
+        "spline_smoothing": args.spline_smoothing,
+        "spline_num_samples": args.spline_num_samples,
+    }
+
+
+def _multiprocess_worker(gpu_id: int, scene_dirs: List[Path], runner_kwargs: Dict[str, Any], output_dir: Path) -> None:
+    """Each worker process binds to a single GPU and runs assigned scenes."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    worker_kwargs = dict(runner_kwargs)
+    # In the worker process, the visible device list has length 1; use cuda:0 when available.
+    worker_kwargs["device"] = "cuda:0" if torch.cuda.is_available() else "cpu"
+    runner = SimLingoInferenceBaseline(**worker_kwargs)
+    for scene_dir in scene_dirs:
+        runner.run_scene(scene_dir, output_dir)
 
 
 # pred_route -> 곡률 제곱합 (조향 강도)
@@ -1088,6 +1145,12 @@ def parse_args():
         help=f"Scenario directory containing frames/speed subdirs (default: {DEFAULT_SCENE_DIR})",
     )
     parser.add_argument(
+        "--scene_dirs",
+        type=Path,
+        nargs="+",
+        help="Optional multiple scene directories; overrides --scene_dir when provided.",
+    )
+    parser.add_argument(
         "--output_dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -1100,6 +1163,12 @@ def parse_args():
         choices=["auto", "speed", "route"],
         default="auto",
         help="Which prediction head to use for scalar target construction.",
+    )
+    parser.add_argument(
+        "--gpu_ids",
+        type=str,
+        default=None,
+        help="Comma-separated GPU ids to use with multi-process launch (e.g., 0,1,2,3).",
     )
     parser.add_argument(
         "--explain_mode",
@@ -1175,24 +1244,38 @@ def parse_args():
 def main():
     """CLI 인자를 바탕으로 러너를 생성하고 장면 추론을 실행합니다."""
     args = parse_args()
-    runner = SimLingoInferenceBaseline(
-        config_path=args.config,
-        checkpoint_path=args.checkpoint,
-        device=args.device,
-        target_mode=args.target_mode,
-        explain_mode=args.explain_mode,
-        text_token_strategy=args.text_token_strategy,
-        text_token_index=args.text_token_index,
-        kinematic_metric=args.kinematic_metric,
-        image_size=args.image_size,
-        max_patches=args.max_patches,
-        frames_subdir=args.frames_subdir,
-        speed_subdir=args.speed_subdir,
-        use_spline=args.use_spline,
-        spline_smoothing=args.spline_smoothing,
-        spline_num_samples=args.spline_num_samples,
-    )
-    runner.run_scene(args.scene_dir, args.output_dir)
+    scene_dirs = args.scene_dirs or [args.scene_dir]
+    runner_kwargs = _build_runner_kwargs_from_args(args)
+    gpu_ids = _parse_gpu_ids(args.gpu_ids)
+
+    if gpu_ids and len(gpu_ids) > 1:
+        # 멀티 GPU: GPU별로 별도 프로세스를 띄워 scene_dirs를 분배
+        try:
+            mp.set_start_method("spawn")
+        except RuntimeError:
+            # 이미 설정된 경우 무시
+            pass
+        assignments = _split_scenes_across_gpus(scene_dirs, gpu_ids)
+        proc_gpu_pairs: List[Tuple[int, mp.Process]] = []
+        for gpu_id, assigned_scenes in zip(gpu_ids, assignments):
+            if not assigned_scenes:
+                continue
+            p = mp.Process(
+                target=_multiprocess_worker,
+                args=(gpu_id, assigned_scenes, runner_kwargs, args.output_dir),
+            )
+            p.start()
+            proc_gpu_pairs.append((gpu_id, p))
+        for gpu_id, p in proc_gpu_pairs:
+            p.join()
+            if p.exitcode != 0:
+                raise RuntimeError(f"Worker on GPU {gpu_id} exited with code {p.exitcode}")
+        return
+
+    # 단일 GPU/CPU 실행 경로
+    runner = SimLingoInferenceBaseline(**runner_kwargs)
+    for scene_dir in scene_dirs:
+        runner.run_scene(scene_dir, args.output_dir)
 
 
 if __name__ == "__main__":
