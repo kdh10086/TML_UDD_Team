@@ -13,5 +13,6 @@ numpy>=1.26.0
 matplotlib>=3.10.0
 sentencepiece>=0.1.99
 safetensors>=0.4.3
+einops>=0.7.0
 opencv-python>=4.8.0
 tqdm>=4.66.0
