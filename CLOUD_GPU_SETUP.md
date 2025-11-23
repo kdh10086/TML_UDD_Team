@@ -41,7 +41,7 @@ Host remote_gpu
     ServerAliveInterval 30
     ServerAliveCountMax 3
 ```
-
+Port 번호는 매번 달라질 수 있으므로, 웹페이지 접속해서 확인하고 수정해주세요.
 3. 저장하고 나오기 (`Ctrl + O` 엔터 -> `Ctrl + X`)
 
 #### 3단계: 공개키 전송 및 등록 대기
@@ -135,11 +135,18 @@ data/<dataset>/<scenario>/
 ```bash
 python experiment/simlingo_inference_baseline.py \
   --scene_dir data/DREYEVE_DATA_preprocessed/01 \
-  --output_dir experiment_outputs/simlingo_inference
+  --output_dir experiment_outputs/simlingo_inference \
+  --target_mode auto \
+  --explain_mode action \
+  --text_token_strategy max \
+  --text_token_index -1 \
+  --kinematic_metric curv_energy \
+  --image_size 224 \
+  --max_patches 2
 ```
 - tqdm로 시나리오 단위 진행률 표시.
 - 입력 속도는 `video_garmin_speed`의 m/s를 자동 주입. 없으면 0 m/s 폴백.
 
-## 8) 기타
+## 7) 기타
 - FlashAttention2 미설치 시 경고만 출력, 동작에는 문제 없음.
 - HF 모델 캐시 경로를 커스텀하려면 환경변수 `HF_HOME` 설정.
