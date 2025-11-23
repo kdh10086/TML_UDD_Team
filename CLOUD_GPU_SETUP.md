@@ -83,28 +83,19 @@ Git credential helper(store) 설정으로 토큰 캐싱까지 완료합니다. �
 
 ## 3) 필수 시스템 패키지(우분투)
 ```bash
-sudo apt-get update
-sudo apt-get install -y libgl1 ffmpeg
+# sudo가 없으면 sudo를 빼고 실행
+apt-get update
+apt-get install -y libgl1 ffmpeg
 ```
 
 ## 3-1) Codex CLI 설치
+# Codex CLI가 필요할 때 (sudo가 없으면 sudo 생략)
 ```bash
-# 1) 패키지 업데이트 + curl 설치
-sudo apt update && sudo apt install -y curl
-
-# 2) Node.js LTS 저장소 추가
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-
-# 3) Node.js + npm 설치
-sudo apt install -y nodejs
-
-# 4) Codex CLI 전역 설치
-sudo npm install -g @openai/codex
-
-# 5) 버전 및 설치 확인
-node -v
-npm -v
-codex --help
+apt-get update && apt-get install -y curl
+curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+apt-get install -y nodejs
+npm install -g @openai/codex
+# 확인: node -v && npm -v && codex --help
 ```
 
 ## 4) 데이터 배치
