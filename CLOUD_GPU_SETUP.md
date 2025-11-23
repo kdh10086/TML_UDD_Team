@@ -150,33 +150,35 @@ data/<dataset>/<scenario>/
 - 입력 속도는 `video_garmin_speed`의 m/s를 자동 주입. 없으면 0 m/s 폴백.
 
 ## 6-1) ViT 어텐션 시각화만 실행 (모델 재실행 없이 캐시 재사용)
-- 전제: `simlingo_inference_baseline`로 생성된 `.pt`에 어텐션이 포함돼 있어야 함(`experiment_outputs/simlingo_inference/.../pt/*.pt`).
+- 전제: `simlingo_inference_baseline`로 생성된 `.pt`에 비전 어텐션이 포함돼 있어야 함(`experiment_outputs/simlingo_inference/.../pt/*.pt`).
+- `--payload_root`는 해당 `.pt` 디렉터리(또는 상위). `.pt`에 이미지 경로가 없으면 `scene_dir`(선택)이나 `payload_root/input_images/<tag>.png`로 복구.
 - 루트에서 실행 예시(샘플 데이터, 액션 모드 캐시):
 ```bash
 # Raw attention
 python -m experiment.vit_raw_attention \
-  --scene_dir data/sample/01 \
   --output_dir experiment_outputs/vit_raw \
-  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_01_action_curv_energy_251123_2207 \
-  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_01_action_curv_energy_251123_2207
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
+  --scene_dir data/sample_scene \
+  --layer_index -1 --head_strategy mean --colormap JET --alpha 0.5
 
 # Attention rollout
 python -m experiment.vit_attention_rollout \
-  --scene_dir data/sample/01 \
   --output_dir experiment_outputs/vit_rollout \
-  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --residual_alpha 0.5 --start_layer 0
+  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
+  --scene_dir data/sample_scene \
+  --residual_alpha 0.5 --start_layer 0 --colormap JET --alpha 0.5
 
 # Attention flow
 python -m experiment.vit_attention_flow \
-  --scene_dir data/sample/01 \
   --output_dir experiment_outputs/vit_flow \
-  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --residual_alpha 0.5 --discard_ratio 0.0
+  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
+  --scene_dir data/sample_scene \
+  --residual_alpha 0.5 --discard_ratio 0.0 --colormap JET --alpha 0.5
 ```
-- `--payload_root`에 `.pt`가 없거나 어텐션이 비어 있으면 모델을 다시 실행하므로 VRAM이 부족할 수 있음. 캐시가 유효한지 먼저 확인하세요.
+- 캐시가 없으면 실행 불가(모델 재실행 없음). `.pt`에 비전 어텐션이 포함돼 있는지 먼저 확인하세요.
 
 ## 압축/전송(참고)
 - 압축: `tar -czf <output.tgz> -C <input_parent_dir> <relative_path>`  
@@ -199,4 +201,3 @@ gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk
 #DREYEVE_DATA_filtered 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/1-VgGkHAf5WNOCEISZXjNazaaEn3vE9r0/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
 ```
-

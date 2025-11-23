@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import math
+import importlib.util
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -16,15 +18,13 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+from hydra.utils import to_absolute_path
+from omegaconf import OmegaConf
+from transformers import AutoProcessor
 
 from experiment.overlay_utils import overlay_trajectories, resolve_overlay_dirs
-from experiment.simlingo_inference_baseline import (
-    DEFAULT_CHECKPOINT_PATH,
-    DEFAULT_CONFIG_PATH,
-    DEFAULT_OUTPUT_DIR,
-    DEFAULT_SCENE_DIR,
-    SimLingoInferenceBaseline,
-)
+from experiment.simlingo_inference_baseline import DEFAULT_CONFIG_PATH, DEFAULT_OUTPUT_DIR, DEFAULT_SCENE_DIR
+from simlingo_training.utils.custom_types import LanguageLabel
 
 
 def avg_heads(cam: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
@@ -50,26 +50,22 @@ def show_cam_on_image(img: np.ndarray, mask: np.ndarray, colormap_code: int, alp
     return cam
 
 
-class GenericAttentionActionVisualizer(SimLingoInferenceBaseline):
-    """Sim-Lingo 액션 모드 기반 Generic Attention 히트맵 생성기."""
+class GenericAttentionActionVisualizer:
+    """Sim-Lingo 액션 모드 Generic Attention 히트맵 생성기 (캐시 전용, 모델 로드 없음)."""
 
     def __init__(
         self,
         config_path: Path = DEFAULT_CONFIG_PATH,
-        checkpoint_path: Path = DEFAULT_CHECKPOINT_PATH,
         device: Optional[str] = None,
         colormap: str = "JET",
         alpha: float = 0.5,
         trajectory_overlay_root: Optional[Path] = None,
         payload_root: Optional[Path] = None,
     ) -> None:
-        super().__init__(
-            config_path=config_path,
-            checkpoint_path=checkpoint_path,
-            device=device,
-            target_mode="auto",
-            explain_mode="action",
-        )
+        if payload_root is None:
+            raise ValueError("payload_root (.pt 디렉터리) 없이는 실행할 수 없습니다.")
+        self.config_path = Path(config_path)
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         cmap_name = colormap.upper()
         attr_name = f"COLORMAP_{cmap_name}"
         if not hasattr(cv2, attr_name):
@@ -78,6 +74,10 @@ class GenericAttentionActionVisualizer(SimLingoInferenceBaseline):
         if not (0.0 <= alpha <= 1.0):
             raise ValueError("alpha must be between 0 and 1.")
         self.alpha = alpha
+        self.cfg = OmegaConf.load(self.config_path)
+        self.processor = AutoProcessor.from_pretrained(self.cfg.model.vision_model.variant, trust_remote_code=True)
+        self.tokenizer = self.processor.tokenizer if hasattr(self.processor, "tokenizer") else self.processor
+        self.tokenizer.padding_side = "left"
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
         self.trajectory_overlay_root = trajectory_overlay_root
         self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
@@ -109,32 +109,11 @@ class GenericAttentionActionVisualizer(SimLingoInferenceBaseline):
     ) -> Path:
         record_tag = image_path.stem
         cached_payload = self._load_cached_payload(record_tag)
-        if cached_payload is not None:
-            return self._process_cached_payload(
-                cached_payload, image_path, output_dir, suffix, route_overlay_dir, speed_overlay_dir
-            )
-
-        self.recorder.start_recording(record_tag)
-        driving_input, meta, prompt_token_ids = self._prepare_driving_input_with_prompt(image_path)
-        outputs = self.model(driving_input)
-        target_scalar, target_meta = self._compute_action_target(outputs)
-        if target_scalar is None:
-            raise RuntimeError("Failed to build scalar target for action mode Generic Attention.")
-        target_scalar.backward(retain_graph=False)
-        attention_maps = self.recorder.stop_recording()
-        self.model.zero_grad(set_to_none=True)
-        relevance = self._compute_language_relevance(attention_maps)
-        source_index = len(prompt_token_ids) - 1
-        seq_len = relevance.shape[0]
-        if source_index >= seq_len:
-            raise IndexError(f"Target token index ({source_index}) exceeds recorded attention sequence ({seq_len}).")
-        image_token_positions = self._select_image_token_positions(prompt_token_ids, meta["num_total_image_tokens"])
-        token_scores = relevance[source_index, image_token_positions]
-        heatmap = self._scores_to_heatmap(token_scores, meta)
-        overlay = self._render_overlay(image_path, heatmap, record_tag, route_overlay_dir, speed_overlay_dir)
-        output_path = output_dir / f"{image_path.stem}_{suffix}.png"
-        Image.fromarray(overlay).save(output_path)
-        return output_path
+        if cached_payload is None:
+            raise RuntimeError("Cached payload(.pt) not found; this runner requires precomputed attention.")
+        return self._process_cached_payload(
+            cached_payload, image_path, output_dir, suffix, route_overlay_dir, speed_overlay_dir
+        )
 
     def _process_cached_payload(
         self,
@@ -165,6 +144,18 @@ class GenericAttentionActionVisualizer(SimLingoInferenceBaseline):
         Image.fromarray(overlay).save(output_path)
         return output_path
 
+    @staticmethod
+    def _prepare_output_subdir(output_root: Path, scene_dir: Path, suffix: str) -> Path:
+        scenario_name = scene_dir.name
+        base = f"{scenario_name}_{suffix}"
+        candidate = output_root / base
+        counter = 1
+        while candidate.exists():
+            candidate = output_root / f"{base}_{counter}"
+            counter += 1
+        candidate.mkdir(parents=True, exist_ok=False)
+        return candidate
+
     def _scores_to_heatmap(self, scores: torch.Tensor, meta: Dict[str, Any]) -> np.ndarray:
         grid_size = int(math.sqrt(meta["num_total_image_tokens"]))
         heatmap = scores.reshape(grid_size, grid_size).detach().to("cpu").numpy()
@@ -186,18 +177,6 @@ class GenericAttentionActionVisualizer(SimLingoInferenceBaseline):
         cam = np.uint8(255 * cam)
         cam = overlay_trajectories(cam, tag, route_overlay_dir, speed_overlay_dir)
         return cam
-
-    def _prepare_driving_input_with_prompt(
-        self, image_path: Path
-    ) -> tuple[DrivingInput, Dict[str, Any], List[int]]:
-        driving_input, meta = self._prepare_driving_input(image_path)
-        prompt_token_ids = self._extract_prompt_token_ids(driving_input.prompt)
-        return driving_input, meta, prompt_token_ids
-
-    @staticmethod
-    def _extract_prompt_token_ids(lang_label) -> List[int]:
-        valid_mask = lang_label.phrase_valid[0].bool()
-        return lang_label.phrase_ids[0][valid_mask].tolist()
 
     def _compute_language_relevance(
         self, attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]]
@@ -247,11 +226,107 @@ class GenericAttentionActionVisualizer(SimLingoInferenceBaseline):
                 moved[name].append(moved_entry)
         return moved
 
+    def _build_language_label(
+        self,
+        prompt: str,
+        placeholder_batch_list: List[dict],
+        num_patches_all: int,
+    ) -> LanguageLabel:
+        conversation = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}, {"type": "image"}],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Waypoints:"}],
+            },
+        ]
+        conv_batch_list = [conversation]
+        questions: List[str] = []
+        for conv in conv_batch_list:
+            for item in conv:
+                questions.append(item["content"][0]["text"])
+                item["content"] = item["content"][0]["text"]
+        conv_module = self._load_conversation_template_module()
+        prompt_batch_list: List[str] = []
+        for idx, conv in enumerate(conv_batch_list):
+            question = questions[idx]
+            if "<image>" not in question:
+                question = "<image>\n" + question
+            template = conv_module.get_conv_template("internlm2-chat")
+            for conv_part_idx, conv_part in enumerate(conv):
+                if conv_part["role"] == "assistant":
+                    template.append_message(template.roles[1], None)
+                elif conv_part["role"] == "user":
+                    if conv_part_idx == 0 and "<image>" not in conv_part["content"]:
+                        conv_part["content"] = "<image>\n" + conv_part["content"]
+                    template.append_message(template.roles[0], conv_part["content"])
+                else:
+                    raise ValueError(f"Unsupported role {conv_part['role']}")
+            query = template.get_prompt()
+            system_prompt = template.system_template.replace(
+                "{system_message}", template.system_message
+            ) + template.sep
+            query = query.replace(system_prompt, "")
+            IMG_START_TOKEN = "<img>"
+            IMG_END_TOKEN = "</img>"
+            IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
+            image_tokens = (
+                IMG_START_TOKEN
+                + IMG_CONTEXT_TOKEN * self.num_image_token * num_patches_all
+                + IMG_END_TOKEN
+            )
+            query = query.replace("<image>", image_tokens, 1)
+            prompt_batch_list.append(query)
+
+        prompt_tokenized = self.tokenizer(
+            prompt_batch_list,
+            padding=True,
+            return_tensors="pt",
+            return_offsets_mapping=True,
+            add_special_tokens=False,
+        )
+        prompt_tokenized_ids = prompt_tokenized["input_ids"]
+        prompt_tokenized_valid = prompt_tokenized["input_ids"] != self.tokenizer.pad_token_id
+        prompt_tokenized_mask = prompt_tokenized_valid
+        return LanguageLabel(
+            phrase_ids=prompt_tokenized_ids.to(self.device),
+            phrase_valid=prompt_tokenized_valid.to(self.device),
+            phrase_mask=prompt_tokenized_mask.to(self.device),
+            placeholder_values=placeholder_batch_list,
+            language_string=prompt_batch_list,
+            loss_masking=None,
+        )
+
+    def _load_conversation_template_module(self):
+        cache_dir = Path("pretrained") / self.cfg.model.vision_model.variant.split("/")[1]
+        cache_dir = Path(to_absolute_path(str(cache_dir)))
+        model_path = cache_dir / "conversation.py"
+        if not model_path.exists():
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                repo_id=self.cfg.model.vision_model.variant,
+                local_dir=str(cache_dir),
+            )
+        spec = importlib.util.spec_from_file_location("get_conv_template", model_path)
+        conv_module = importlib.util.module_from_spec(spec)
+        sys.modules["get_conv_template"] = conv_module
+        spec.loader.exec_module(conv_module)
+        return conv_module
+
+    @staticmethod
+    def _extract_prompt_token_ids(lang_label) -> List[int]:
+        valid_mask = lang_label.phrase_valid[0].bool()
+        return lang_label.phrase_ids[0][valid_mask].tolist()
+
     def _rebuild_prompt_token_ids(self, meta: Dict[str, Any], current_speed: float) -> List[int]:
         placeholder_batch_list: List[dict] = []
         prompt_str = (
             f"Current speed: {current_speed:.1f} m/s. What should the ego vehicle do next? Provide a short commentary."
         )
+        self.num_image_token = int(meta["num_image_tokens_per_patch"])
         lang_label = self._build_language_label(prompt_str, placeholder_batch_list, meta["num_patch_views"])
         return self._extract_prompt_token_ids(lang_label)
 
@@ -309,7 +384,6 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Directory to save heatmaps.",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Hydra config path.")
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT_PATH, help="Checkpoint path.")
     parser.add_argument("--device", type=str, default=None, help="Device (e.g., cuda:0).")
     parser.add_argument("--colormap", type=str, default="JET", help="OpenCV colormap name (e.g., JET).")
     parser.add_argument("--alpha", type=float, default=0.5, help="Overlay blending factor.")
@@ -332,7 +406,6 @@ def main():
     args = build_argparser().parse_args()
     viz = GenericAttentionActionVisualizer(
         config_path=args.config,
-        checkpoint_path=args.checkpoint,
         device=args.device,
         colormap=args.colormap,
         alpha=args.alpha,

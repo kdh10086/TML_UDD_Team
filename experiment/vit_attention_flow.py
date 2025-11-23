@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vision transformer attention-flow heatmap generator for Sim-Lingo."""
+"""Vision transformer attention-flow heatmap generator for Sim-Lingo (cached payload only)."""
 
 from __future__ import annotations
 
@@ -15,13 +15,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from experiment.overlay_utils import overlay_trajectories, resolve_overlay_dirs
-from experiment.simlingo_inference_baseline import (
-    DEFAULT_CHECKPOINT_PATH,
-    DEFAULT_CONFIG_PATH,
-    DEFAULT_OUTPUT_DIR,
-    DEFAULT_SCENE_DIR,
-    SimLingoInferenceBaseline,
-)
+from experiment.simlingo_inference_baseline import DEFAULT_CONFIG_PATH, DEFAULT_OUTPUT_DIR
 
 
 def show_cam_on_image(img: np.ndarray, mask: np.ndarray, colormap_code: int, alpha: float) -> np.ndarray:
@@ -33,13 +27,12 @@ def show_cam_on_image(img: np.ndarray, mask: np.ndarray, colormap_code: int, alp
     return np.clip(cam, 0, 1)
 
 
-class VisionAttentionFlow(SimLingoInferenceBaseline):
-    """ViT attention-flow 기반 히트맵 생성기."""
+class VisionAttentionFlow:
+    """ViT attention-flow 기반 히트맵 생성기 (캐시 전용)."""
 
     def __init__(
         self,
         config_path: Path = DEFAULT_CONFIG_PATH,
-        checkpoint_path: Path = DEFAULT_CHECKPOINT_PATH,
         device: Optional[str] = None,
         residual_alpha: float = 0.5,
         discard_ratio: float = 0.0,
@@ -48,20 +41,16 @@ class VisionAttentionFlow(SimLingoInferenceBaseline):
         trajectory_overlay_root: Optional[Path] = None,
         payload_root: Optional[Path] = None,
     ) -> None:
-        super().__init__(
-            config_path=config_path,
-            checkpoint_path=checkpoint_path,
-            device=device,
-            target_mode="auto",
-            explain_mode="action",
-            enable_vision_hooks=True,
-            enable_language_hooks=False,
-            skip_backward=True,
-        )
+        if payload_root is None:
+            raise ValueError("payload_root(.pt 디렉터리)이 필요합니다.")
         if not (0.0 <= residual_alpha <= 1.0):
             raise ValueError("residual_alpha must lie in [0, 1].")
         if not (0.0 <= discard_ratio < 1.0):
             raise ValueError("discard_ratio must lie in [0, 1).")
+        self.config_path = Path(config_path)
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.cfg = OmegaConf.load(self.config_path)
+        self.processor = AutoProcessor.from_pretrained(self.cfg.model.vision_model.variant, trust_remote_code=True)
         self.residual_alpha = residual_alpha
         self.discard_ratio = discard_ratio
         cmap_name = colormap.upper()
@@ -76,47 +65,19 @@ class VisionAttentionFlow(SimLingoInferenceBaseline):
         self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
         self._payload_index = self._index_payloads(self.payload_root)
 
-    def generate_scene_heatmaps(self, scene_dir: Path, output_dir: Path, suffix: str = "vit_flow") -> None:
-        scene_dir = Path(scene_dir)
+    def generate_scene_heatmaps(self, scene_dir: Optional[Path], output_dir: Path, suffix: str = "vit_flow") -> None:
         output_dir = Path(output_dir)
-        if not scene_dir.exists():
-            raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
         scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
-        images_dir = scene_dir / "images"
-        image_root = images_dir if images_dir.exists() else scene_dir
-        image_paths = sorted(
-            [p for p in image_root.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
-        )
-        route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
-        for image_path in image_paths:
-            self._process_single_image(image_path, scenario_output_dir, suffix, route_dir, speed_dir)
-
-    def _process_single_image(
-        self,
-        image_path: Path,
-        output_dir: Path,
-        suffix: str,
-        route_overlay_dir: Optional[Path],
-        speed_overlay_dir: Optional[Path],
-    ) -> Path:
-        record_tag = image_path.stem
-        cached_payload = self._load_cached_payload(record_tag)
-        if cached_payload is not None:
-            return self._process_cached_payload(
-                cached_payload, image_path, output_dir, suffix, route_overlay_dir, speed_overlay_dir
+        if not self._payload_index:
+            raise RuntimeError("No payloads found under payload_root.")
+        for tag, payload_path in sorted(self._payload_index.items()):
+            payload = torch.load(payload_path, map_location=self.device)
+            image_path = self._resolve_image_path(payload, scene_dir)
+            route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
+            self._process_cached_payload(
+                payload, image_path, scenario_output_dir, suffix, route_dir, speed_dir
             )
-        self.recorder.start_recording(record_tag)
-        driving_input, meta = self._prepare_driving_input(image_path)
-        _ = self.model(driving_input)
-        attention_maps = self.recorder.stop_recording()
-        self.model.zero_grad(set_to_none=True)
-        token_scores = self._compute_attention_flow(attention_maps, meta["num_total_image_tokens"])
-        heatmap = self._scores_to_heatmap(token_scores, meta)
-        overlay = self._render_overlay(image_path, heatmap, record_tag, route_overlay_dir, speed_overlay_dir)
-        output_path = output_dir / f"{image_path.stem}_{suffix}.png"
-        Image.fromarray(overlay).save(output_path)
-        return output_path
 
     def _process_cached_payload(
         self,
@@ -138,6 +99,41 @@ class VisionAttentionFlow(SimLingoInferenceBaseline):
         output_path = output_dir / f"{image_path.stem}_{suffix}.png"
         Image.fromarray(overlay).save(output_path)
         return output_path
+
+    def _resolve_image_path(self, payload: Dict[str, Any], scene_dir: Optional[Path]) -> Path:
+        raw_path = payload.get("image_path")
+        if raw_path:
+            p = Path(raw_path)
+            if p.exists():
+                return p
+        if scene_dir is not None:
+            candidates = []
+            scene_dir = Path(scene_dir)
+            candidates.append(scene_dir / "images" / f"{payload['tag']}.png")
+            candidates.append(scene_dir / f"{payload['tag']}.png")
+            for c in candidates:
+                if c.exists():
+                    return c
+        for base in [self.payload_root, self.payload_root.parent if self.payload_root else None]:
+            if base is None:
+                continue
+            input_dir = base / "input_images"
+            cand = input_dir / f"{payload['tag']}.png"
+            if cand.exists():
+                return cand
+        raise FileNotFoundError(f"Image not found for payload tag {payload.get('tag')}")
+
+    @staticmethod
+    def _prepare_output_subdir(output_root: Path, scene_dir: Optional[Path], suffix: str) -> Path:
+        scenario_name = scene_dir.name if scene_dir is not None else "payload"
+        base = f"{scenario_name}_{suffix}"
+        candidate = output_root / base
+        counter = 1
+        while candidate.exists():
+            candidate = output_root / f"{base}_{counter}"
+            counter += 1
+        candidate.mkdir(parents=True, exist_ok=False)
+        return candidate
 
     def _collect_vision_matrices(
         self, attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]]
@@ -298,8 +294,7 @@ class VisionAttentionFlow(SimLingoInferenceBaseline):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sim-Lingo ViT attention-flow generator")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Hydra config path.")
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT_PATH, help="Model checkpoint path.")
-    parser.add_argument("--scene_dir", type=Path, default=DEFAULT_SCENE_DIR, help="Directory with scene images.")
+    parser.add_argument("--scene_dir", type=Path, default=None, help="Optional directory with scene images.")
     parser.add_argument("--output_dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory to save heatmaps.")
     parser.add_argument("--device", type=str, default=None, help="Device identifier, e.g., cuda:0.")
     parser.add_argument(
@@ -326,8 +321,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--payload_root",
         type=Path,
-        default=None,
-        help="Optional path to cached Sim-Lingo inference pt directory (or its parent).",
+        required=True,
+        help="Path to cached .pt payload directory (or its parent).",
     )
     return parser.parse_args()
 
@@ -336,7 +331,6 @@ def main() -> None:
     args = parse_args()
     runner = VisionAttentionFlow(
         config_path=args.config,
-        checkpoint_path=args.checkpoint,
         device=args.device,
         residual_alpha=args.residual_alpha,
         discard_ratio=args.discard_ratio,
