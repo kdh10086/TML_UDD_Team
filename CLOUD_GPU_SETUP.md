@@ -78,7 +78,7 @@ ssh remote_gpu
 ```bash
 git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD_Team && chmod +x tools/cloud_bootstrap.sh && bash tools/cloud_bootstrap.sh
 ```
-스크립트가 libgl1/ffmpeg/git-lfs 설치, git lfs pull, requirements 설치, 지정된 공개키(ssh-ed25519 …hyun) 등록까지 수행하고,
+스크립트가 libgl1/ffmpeg/git-lfs 설치, git lfs pull, requirements 설치, 지정된 공개키(ssh-ed25519 …hyun, ryu) 등록까지 수행하고,
 `git config --global credential.helper store` 설정으로 토큰 캐싱까지 완료합니다. 남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
 
 ## 3) 필수 시스템 패키지(우분투)
@@ -109,15 +109,15 @@ git config --global user.email "<your email>"
 ## 4) 체크포인트 및 샘플 데이터 다운로드
 ### SimLingo 체크포인트(HuggingFace)
 ```bash
-git lfs clone https://huggingface.co/RenzKa/simlingo checkpoints/simlingo/simlingo/checkpoints/
+cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
 ```
 
-### 샘플 데이터셋(Google Drive)
+### Persistent Storage에 저장된 데이터셋을 /UDD_TML_Team/data/로 복사, 압축해제
 ```bash
-python3 -m pip install --upgrade gdown
-mkdir -p data && cd data
-gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
-unzip -o sample_dataset.zip
+#샘플 데이터셋 복사
+unzip /mnt/data1/sample_dataset.zip -d /root/TML_UDD_Team/data/
+#원본 데이터셋 복사 (옵션)
+unzip /mnt/data1/DREYEVE_DATA_filtered.zip -d /root/TML_UDD_Team/data/
 ```
 
 ## 5) 데이터 배치
@@ -132,18 +132,20 @@ data/<dataset>/<scenario>/
 - 서브디렉토리명이 다르면 `--frames_subdir/--speed_subdir`로 지정.
 
 ## 6) Sim-Lingo 추론 실행
-```bash
-PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
-  --scene_dir data/sample/01 \
-  --output_dir experiment_outputs/simlingo_inference \
-  --target_mode auto \
-  --explain_mode action \
-  --text_token_strategy max \
-  --text_token_index -1 \
-  --kinematic_metric curv_energy \
-  --image_size 224 \
-  --max_patches 2
-```
+- 단일 GPU 실행 예:
+  ```bash
+  PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
+    --scene_dir data/sample/01 \
+    --output_dir experiment_outputs/simlingo_inference \
+    --target_mode auto \
+    --explain_mode action \
+    --text_token_strategy max \
+    --text_token_index -1 \
+    --kinematic_metric curv_energy \
+    --image_size 448 \
+    --max_patches 2
+  ```
+  - `--gpu_ids`를 주면 GPU별 별도 프로세스를 띄워 `--scene_dirs`를 균등 배분합니다.
 - tqdm로 시나리오 단위 진행률 표시.
 - 입력 속도는 `video_garmin_speed`의 m/s를 자동 주입. 없으면 0 m/s 폴백.
 
@@ -176,6 +178,25 @@ python -m experiment.vit_attention_flow \
 ```
 - `--payload_root`에 `.pt`가 없거나 어텐션이 비어 있으면 모델을 다시 실행하므로 VRAM이 부족할 수 있음. 캐시가 유효한지 먼저 확인하세요.
 
+## 압축/전송(참고)
+- 압축: `tar -czf <output.tgz> -C <input_parent_dir> <relative_path>`  
+  예: `tar -czf results.tgz -C /root/TML_UDD_Team experiment_outputs/simlingo_inference`
+- 압축 해제: `tar -xzf <input.tgz> -C <output_dir>`  
+  예: `tar -xzf results.tgz -C /root/TML_UDD_Team/experiment_outputs/simlingo_inference`
+- scp 다운로드(로컬에서 실행): `scp -P <PORT> -r <user>@<host>:<remote_path> <local_dest>`  
+  예: `scp -P 30002 -r root@202.39.40.153:/root/TML_UDD_Team/experiment_outputs/simlingo_inference/결과디렉토리압축파일 ~/home/컴퓨터이름/TML_UDD_Team/experiment_outputs/cloud_outputs/`
+
 ## 7) 기타
 - FlashAttention2 미설치 시 경고만 출력, 동작에는 문제 없음.
 - HF 모델 캐시 경로를 커스텀하려면 환경변수 `HF_HOME` 설정.
+
+### Persistent Storage에 데이터셋 다운로드(Google Drive)
+```bash
+python3 -m pip install --upgrade gdown
+cd /mnt/data1/
+#샘플 데이터셋
+gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
+#DREYEVE_DATA_filtered 데이터셋
+gdown (추가 예정) -O DREYEVE_DATA_filtered.zip
+```
+

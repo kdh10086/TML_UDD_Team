@@ -11,24 +11,35 @@ cd "$REPO_ROOT"
 echo "[*] Repository root: $REPO_ROOT"
 
 # Add provided public key to ~/.ssh/authorized_keys if not already present
-KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBgSJupdBIRqkb5rJmsHRxqzLDstbwRTUvF15soBuzal hyun"
+KEYS=(
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBgSJupdBIRqkb5rJmsHRxqzLDstbwRTUvF15soBuzal hyun"
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB9TP2KEGvbodSbGxmBNAUFDB4ZWdGNc/Fe7DGHXkxEc Ryu"
+)
 mkdir -p "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
 AUTH="$HOME/.ssh/authorized_keys"
 touch "$AUTH"
 chmod 600 "$AUTH"
-if ! grep -q "$KEY" "$AUTH"; then
-  echo "$KEY" >> "$AUTH"
-  echo "[*] Added public key to authorized_keys."
-else
-  echo "[*] Public key already present in authorized_keys."
-fi
+for KEY in "${KEYS[@]}"; do
+  if ! grep -q "$KEY" "$AUTH"; then
+    echo "$KEY" >> "$AUTH"
+    echo "[*] Added public key to authorized_keys: $KEY"
+  else
+    echo "[*] Public key already present: $KEY"
+  fi
+done
 
 # Configure Git to store credentials to avoid repeated token prompts
 if command -v git >/dev/null 2>&1; then
   git config --global credential.helper store
   echo "[*] Git credential helper set to 'store' (tokens will be cached in ~/.git-credentials)."
 fi
+
+# Create expected directories
+mkdir -p "$REPO_ROOT/checkpoints"
+mkdir -p "$REPO_ROOT/data"
+mkdir -p "$REPO_ROOT/experiment_outputs/simlingo_inference"
+echo "[*] Created directories: checkpoints/, data/, experiment_outputs/simlingo_inference/"
 
 if command -v apt-get >/dev/null 2>&1; then
   echo "[*] Installing system packages (libgl1 ffmpeg git-lfs)..."
