@@ -109,18 +109,8 @@ git config --global user.email "<your email>"
 ## 4) 체크포인트 및 샘플 데이터 다운로드
 ### SimLingo 체크포인트(HuggingFace)
 ```bash
-mkdir -p checkpoints/ && cd checkpoints/
 git lfs clone https://huggingface.co/RenzKa/simlingo
 ```
-
-### 샘플 데이터셋(Google Drive)
-```bash
-python3 -m pip install --upgrade gdown
-mkdir -p data && cd data
-gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
-unzip -o sample_dataset.zip
-```
-unzip /mnt/data1/sample_dataset.zip -d /root
 
 ## 5) 데이터 배치
 - 전처리된 구조 예:
@@ -178,6 +168,23 @@ python -m experiment.vit_attention_flow \
 ```
 - `--payload_root`에 `.pt`가 없거나 어텐션이 비어 있으면 모델을 다시 실행하므로 VRAM이 부족할 수 있음. 캐시가 유효한지 먼저 확인하세요.
 
+## 압축/전송(참고)
+- 압축: `tar -czf <output.tgz> -C <input_parent_dir> <relative_path>`  
+  예: `tar -czf results.tgz -C /root/TML_UDD_Team experiment_outputs/simlingo_inference`
+- 압축 해제: `tar -xzf <input.tgz> -C <output_dir>`  
+  예: `tar -xzf results.tgz -C /root/TML_UDD_Team/experiment_outputs/simlingo_inference`
+- scp 다운로드(로컬에서 실행): `scp -P <PORT> -r <user>@<host>:<remote_path> <local_dest>`  
+  예: `scp -P 30002 -r root@202.39.40.153:/root/TML_UDD_Team/experiment_outputs/simlingo_inference/결과디렉토리압축파일 ~/home/컴퓨터이름/TML_UDD_Team/experiment_outputs/cloud_outputs/`
+
 ## 7) 기타
 - FlashAttention2 미설치 시 경고만 출력, 동작에는 문제 없음.
 - HF 모델 캐시 경로를 커스텀하려면 환경변수 `HF_HOME` 설정.
+
+### Persistent Storage에 데이터셋 다운로드(Google Drive)
+```bash
+python3 -m pip install --upgrade gdown
+cd /mnt/data1/
+#샘플 데이터셋
+gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
+gdown 
+```
