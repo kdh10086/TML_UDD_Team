@@ -36,7 +36,7 @@
 - action 타깃: 액션 토큰이 아니라 **액션 MLP 출력( pred_route 20×2, pred_speed_wps 10×2 )을 곡선으로 근사 → 운동학 함수 → 스칼라 \(y_t\)**. kinematic metric은 플러그인(curv_energy/acc_energy/progress/brake/jerk 등).
 - text 타깃: 생성 텍스트 로짓에서 전략(max/last/index)으로 스칼라를 선택해 `backward` 수행.
 - payload 구조: `target_scalar`, `target_info`, `attention`(attn+grad per block), `meta`(원본 H/W, 이미지 토큰 수), `text_outputs`(token ids/scores/strings/decoded) 등이 포함됨. Generic/다른 메소드에서 재추론 없이 활용 가능해야 함.
-- 입력 규약: `scene_dir`는 시나리오 루트(`.../sorted_index/<city>/<scenario>`)를 가리키며, 스크립트가 하위 `images/`에서 프레임을 읽는다. 프롬프트는 commentary 모드 고정(`Current speed: {speed} m/s. What should the ego vehicle do next? Provide a short commentary.`). 기본은 모든 프레임에 0 m/s를 입력·표기하며, `--use_prev_speed`를 켜면 이전 프레임 `pred_speed_wps`에서 속도를 근사(0~30 m/s 클램프, 3구간 평균)해 다음 프롬프트/`vehicle_speed`에 주입한다.
+- 입력 규약: `scene_dir`는 시나리오 루트(`.../sorted_index/<city>/<scenario>`)를 가리키며, 스크립트가 하위 `images/`에서 프레임을 읽는다. 프롬프트는 commentary 모드 고정(`Current speed: {speed} m/s. What should the ego vehicle do next? Provide a short commentary.`). 현재 기본은 모든 프레임에 0 m/s를 입력·표기하며, 이전 프레임 예측 속도 재주입 옵션은 제거된 상태다(실제 속도 주입 방안 필요).
 - 출력 포맷: scene 단위로 `sorted_index(or original_index)_<city>_<scenario>_{mode}_{detail}_{YYMMDD_HHMM}/` 생성되고, 중복 시 `_1` 등 suffix로 덮어쓰기 방지. 여기서 `{detail}`은 action 모드면 kinematic metric 이름, text 모드면 text_token_strategy 이름. 그 안에 파일 유형별 서브디렉토리(`pt/`, `route_overlay/`, `speed_overlay/`, `text_output/`, `pred_route/`, `pred_speed_wps/`, `input_images/`)가 있으며, 각 서브디렉토리에는 입력 이미지 스템 이름을 딴 파일이 저장됨(예: `pt/frame001.pt`, `route_overlay/frame001.png`, `speed_overlay/frame001.png`, `text_output/frame001.txt`, `pred_route/frame001.txt`, `pred_speed_wps/frame001.txt`, `input_images/frame001.png`). PNG는 투명 배경 위에 투영점만 표시.
 - 전처리: `dynamic_preprocess` 호출 시 `use_global_img`가 config에 없을 경우 기본값으로 `True`를 사용하도록 방어 로직 추가.
 - 메모리 튜닝: CLI에서 `--image_size`(기본 448), `--max_patches`(기본 2)를 내려서 GPU 메모리를 줄일 수 있음. 필요 시 `--image_size 336 --max_patches 1` 등으로 실행.
@@ -51,6 +51,9 @@
 - Generic Attention: 현재 텍스트 모드 구현본이 `experiment/generic_attention_baseline.py`에 있으며, **앞으로 action/text 공용으로 `.pt`를 입력 받아 Chefer rule 5/6로 relevance만 누적→히트맵 저장**하도록 리팩터링 필요.
 - ViT 시각화: `experiment/vit_raw_attention.py`, `experiment/vit_attention_rollout.py`, `experiment/vit_attention_flow.py`가 구현 완료(현재는 직접 추론 실행 방식).
 - 통합 실행/데이터 루프: `run_all_methods.py` 등 통합 스크립트와 scene 데이터 준비는 미완.
+- 데이터 전처리/뷰어 툴:
+  - `tools/dreyeve_preprocess.py`: 인터랙티브 통합 모드(frames→crop→speed). data/<name> 또는 전체 경로 입력 후, 배치 크롭 위치만 저장→4fps 균등 프레임 추출→프레임 크롭(FFV1 기준 2:1 박스)→speed_course_coord.txt(km/h)를 m/s로 변환해 프레임 번호 기준 speed 텍스트 생성→전방/히트맵/속도 파일명을 연속 번호로 정렬. 오버레이용 히트맵/프레임 alignment 유지.
+  - `tools/overlay_viewer.py`: data/<name> 또는 전체 경로/시나리오 경로 입력 가능. 전방/히트맵/속도 공통 스템을 열지도(colormap)로 오버레이, 속도 m/s·km/h 동시 표시. Left/Right/a/d로 이동, 시나리오 경계 자동 전환, q/Esc 종료, 창 크기 2배. 시나리오 경로를 주면 해당 시나리오부터 시작하지만 이전/다음 시나리오로도 이동 가능.
 
 ---
 

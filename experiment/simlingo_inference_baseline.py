@@ -25,6 +25,7 @@ import torch
 from hydra.utils import to_absolute_path
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw
+from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoProcessor
 
 # 어떤 위치에서 실행해도 external/simlingo 모듈을 불러올 수 있도록 경로 추가
@@ -40,13 +41,14 @@ from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsic
 
 DEFAULT_CONFIG_PATH = Path("checkpoints/simlingo/simlingo/.hydra/config.yaml")  # 기본 Hydra config
 DEFAULT_CHECKPOINT_PATH = Path("checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt")  # 기본 ckpt
-DEFAULT_SCENE_DIR = Path("data/DADA-2000-Core/sorted_index/4/001")  # 기본 입력 시나리오 디렉토리(하위 images 사용)
+DEFAULT_SCENE_DIR = Path("data/sample/01")  # 기본 입력 시나리오 디렉토리(하위 frames/speed 사용)
 DEFAULT_OUTPUT_DIR = Path("experiment_outputs/simlingo_inference")  # 기본 출력 디렉토리
 DEFAULT_EXPLAIN_MODE = os.environ.get("SIMLINGO_EXPLAIN_MODE", "action")  # action/text 모드 기본값
 DEFAULT_KINEMATIC_METRIC = "curv_energy"  # 운동학 함수 기본값
 DEFAULT_IMAGE_SIZE = 224  # 입력 리사이즈 (기본 448 : 메모리 절감 필요 시 336 / 228 - (우선순위 1))
 DEFAULT_MAX_PATCHES = 2  # dynamic_preprocess max_num (기본 2 : 메모리 절감 필요 시 1 - (우선순위 2))
-DEFAULT_USE_PREV_SPEED = False  # 이전 프레임 예측 속도를 다음 프롬프트/vehicle_speed에 주입할지 여부
+DEFAULT_FRAMES_SUBDIR = "video_garmin"
+DEFAULT_SPEED_SUBDIR = "video_garmin_speed"
 
 EPS = 1e-6
 DELTA_S = 1.0
@@ -257,7 +259,8 @@ class SimLingoInferenceBaseline:
         kinematic_metric: str = DEFAULT_KINEMATIC_METRIC,
         image_size: int = DEFAULT_IMAGE_SIZE,
         max_patches: int = DEFAULT_MAX_PATCHES,
-        use_prev_speed: bool = DEFAULT_USE_PREV_SPEED,
+        frames_subdir: str = DEFAULT_FRAMES_SUBDIR,
+        speed_subdir: str = DEFAULT_SPEED_SUBDIR,
     ) -> None:
         config_path = config_path or DEFAULT_CONFIG_PATH
         self.config_path = Path(config_path)
@@ -282,7 +285,8 @@ class SimLingoInferenceBaseline:
         self.kinematic_metric = kinematic_metric
         self.image_size = image_size
         self.max_patches = max_patches
-        self.use_prev_speed = use_prev_speed
+        self.frames_subdir = frames_subdir
+        self.speed_subdir = speed_subdir
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(
             self.cfg.model.vision_model.variant, trust_remote_code=True
@@ -314,6 +318,7 @@ class SimLingoInferenceBaseline:
         self.model = self._build_model()
         self.recorder = AttentionRecorder()
         self._register_attention_hooks()
+        self._speed_cache: Dict[str, Dict[str, float]] = {}
 
     def _compute_num_image_tokens(self, encoder_variant: str, image_size_override: Optional[int] = None) -> int:
         """InternVL2 비전 인코더 설정에서 이미지 토큰(패치 수)을 계산합니다."""
@@ -485,6 +490,21 @@ class SimLingoInferenceBaseline:
             text_lines.append("Tokens: " + " ".join(tokens))
         output_path.write_text("\n".join(text_lines), encoding="utf-8")
 
+    def _load_speed_table(self, speed_dir: Path) -> Dict[str, float]:
+        """speed 텍스트 디렉토리에서 stem->m/s 매핑을 로드합니다."""
+        key = str(speed_dir.resolve())
+        if key in self._speed_cache:
+            return self._speed_cache[key]
+        table: Dict[str, float] = {}
+        for txt in sorted(speed_dir.glob("*.txt")):
+            try:
+                val = float(txt.read_text().strip().split()[0])
+                table[txt.stem] = val
+            except Exception:
+                continue
+        self._speed_cache[key] = table
+        return table
+
     def run_scene(self, scene_dir: Path, output_dir: Path) -> None:
         """시나리오 디렉토리(하위 images/)의 모든 이미지를 순회하며 추론 결과를 저장합니다."""
         scene_dir = Path(scene_dir)
@@ -492,20 +512,32 @@ class SimLingoInferenceBaseline:
         if not scene_dir.exists():
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        images_dir = scene_dir / "images"
-        if not images_dir.exists():
-            raise FileNotFoundError(f"'images' subdirectory not found under {scene_dir}")
+        # frames 디렉토리 우선 사용, 없으면 images 폴백
+        candidate_dirs = []
+        if self.frames_subdir:
+            candidate_dirs.append(scene_dir / self.frames_subdir)
+        candidate_dirs.append(scene_dir / "images")
+        images_dir = None
+        for cdir in candidate_dirs:
+            if cdir.exists():
+                images_dir = cdir
+                break
+        if images_dir is None:
+            raise FileNotFoundError(f"No frames directory found under {scene_dir} (tried {candidate_dirs})")
+        speed_dir = scene_dir / self.speed_subdir if self.speed_subdir else None
+        speed_table: Dict[str, float] = {}
+        if speed_dir and speed_dir.exists():
+            speed_table = self._load_speed_table(speed_dir)
         mode_suffix = "action" if self.explain_mode == "action" else "text"
         scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, mode_suffix)
         scenario_subdirs = self._prepare_scenario_subdirs(scenario_output_dir)
         image_paths = sorted(
             [p for p in images_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
-        prev_speed_est: Optional[float] = None
-        for image_path in image_paths:
+        for image_path in tqdm(image_paths, desc=f"{scene_dir.name}", unit="img"):
             record_tag = image_path.stem
+            current_speed = speed_table.get(record_tag, 0.0)
             self.recorder.start_recording(record_tag)
-            current_speed = prev_speed_est if (self.use_prev_speed and prev_speed_est is not None) else 0.0
             driving_input, meta = self._prepare_driving_input(image_path, current_speed=current_speed)
             outputs = self.model(driving_input)
             pred_speed_wps, pred_route, _ = outputs
@@ -519,6 +551,7 @@ class SimLingoInferenceBaseline:
             payload = {
                 "tag": record_tag,
                 "image_path": str(image_path),
+                "input_speed_mps": current_speed,
                 "meta": meta,
                 "target_scalar": target_scalar.detach().to("cpu"),
                 "target_info": target_meta,
@@ -553,10 +586,6 @@ class SimLingoInferenceBaseline:
             self._write_tensor_txt(
                 pred_speed_wps, scenario_subdirs["pred_speed_wps"] / f"{record_tag}.txt"
             )
-            if self.use_prev_speed:
-                new_speed = self._estimate_speed_from_wps(pred_speed_wps)
-                if new_speed is not None:
-                    prev_speed_est = new_speed
             # 입력 원본 이미지도 정리용으로 복사
             shutil.copy2(image_path, scenario_subdirs["input_images"] / image_path.name)
 
@@ -701,7 +730,7 @@ class SimLingoInferenceBaseline:
     @staticmethod
     # 행동 요약은 더 이상 사용하지 않음 (텍스트 출력은 모델 생성/펜싱 fallback만 사용)
 
-    def _serialize_text_outputs(self, text_features: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _serialize_text_outputs(text_features: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """text_features 텐서를 CPU 리스트로 변환해 저장 가능하도록 만듭니다."""
         if text_features is None:
             return None
@@ -859,7 +888,7 @@ def parse_args():
         "--scene_dir",
         type=Path,
         default=DEFAULT_SCENE_DIR,
-        help=f"Scenario directory containing 'images/' subfolder (default: {DEFAULT_SCENE_DIR})",
+        help=f"Scenario directory containing frames/speed subdirs (default: {DEFAULT_SCENE_DIR})",
     )
     parser.add_argument(
         "--output_dir",
@@ -915,9 +944,16 @@ def parse_args():
         help="Max number of patches (dynamic_preprocess max_num). Use 1 to reduce GPU memory.",
     )
     parser.add_argument(
-        "--use_prev_speed",
-        action="store_true",
-        help="Use previous frame pred_speed_wps to estimate speed for next prompt/vehicle_speed.",
+        "--frames_subdir",
+        type=str,
+        default=DEFAULT_FRAMES_SUBDIR,
+        help="Subdirectory under scene_dir containing frames (default: video_garmin). Fallback to images/ if missing.",
+    )
+    parser.add_argument(
+        "--speed_subdir",
+        type=str,
+        default=DEFAULT_SPEED_SUBDIR,
+        help="Subdirectory under scene_dir containing per-frame speed txt (m/s) (default: video_garmin_speed).",
     )
     return parser.parse_args()
 
@@ -936,29 +972,11 @@ def main():
         kinematic_metric=args.kinematic_metric,
         image_size=args.image_size,
         max_patches=args.max_patches,
-        use_prev_speed=args.use_prev_speed,
+        frames_subdir=args.frames_subdir,
+        speed_subdir=args.speed_subdir,
     )
     runner.run_scene(args.scene_dir, args.output_dir)
 
 
 if __name__ == "__main__":
     main()
-    @staticmethod
-    def _estimate_speed_from_wps(pred_speed_wps: Optional[torch.Tensor]) -> Optional[float]:
-        """pred_speed_wps로부터 근사 속도를 계산한다. (m/s, 이상치 클램프)"""
-        if pred_speed_wps is None:
-            return None
-        speed = pred_speed_wps.detach().to("cpu").float()
-        if speed.dim() == 3:
-            speed = speed.squeeze(0)
-        if speed.numel() == 0 or speed.dim() != 2 or speed.shape[0] < 2:
-            return None
-        deltas = speed[1:] - speed[:-1]
-        norms = deltas.norm(dim=-1) / DELTA_T
-        if norms.numel() == 0:
-            return None
-        est = norms[:3].mean().item() if norms.numel() >= 3 else norms.mean().item()
-        if not np.isfinite(est):
-            return None
-        est = max(0.0, min(est, 30.0))  # 0~30 m/s 범위로 클램프
-        return est
