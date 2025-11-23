@@ -54,6 +54,9 @@ class VisionAttentionFlow(SimLingoInferenceBaseline):
             device=device,
             target_mode="auto",
             explain_mode="action",
+            enable_vision_hooks=True,
+            enable_language_hooks=False,
+            skip_backward=True,
         )
         if not (0.0 <= residual_alpha <= 1.0):
             raise ValueError("residual_alpha must lie in [0, 1].")

@@ -54,6 +54,9 @@ class VisionRawAttention(SimLingoInferenceBaseline):
             device=device,
             target_mode="auto",
             explain_mode="action",
+            enable_vision_hooks=True,
+            enable_language_hooks=False,
+            skip_backward=True,
         )
         self.layer_index = layer_index
         strategies = {"mean", "max"}

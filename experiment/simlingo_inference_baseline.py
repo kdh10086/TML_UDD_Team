@@ -303,15 +303,18 @@ class AttentionRecorder:
         self._active_buffers: Optional[defaultdict] = None
         self._current_tag: Optional[str] = None
 
-    def register_module(self, module: torch.nn.Module, name: str) -> None:
+    def register_module(self, module: torch.nn.Module, name: str, record_grad: bool = True) -> None:
         def hook(_, __, output):
             if self._active_buffers is None:
                 return
             attn = self._extract_attention(output)
             if attn is None:
                 return
-            attn.retain_grad()
-            self._active_buffers.setdefault(name, []).append(attn)
+            if record_grad:
+                attn.retain_grad()
+                self._active_buffers.setdefault(name, []).append(attn)
+            else:
+                self._active_buffers.setdefault(name, []).append(attn.detach())
 
         handle = module.register_forward_hook(hook)
         self.handles.append(handle)
@@ -401,6 +404,9 @@ class SimLingoInferenceBaseline:
         use_spline: bool = DEFAULT_USE_SPLINE,
         spline_smoothing: float = DEFAULT_SPLINE_SMOOTHING,
         spline_num_samples: int = DEFAULT_SPLINE_NUM_SAMPLES,
+        enable_vision_hooks: Optional[bool] = None,
+        enable_language_hooks: Optional[bool] = None,
+        skip_backward: bool = False,
     ) -> None:
         config_path = config_path or DEFAULT_CONFIG_PATH
         self.config_path = Path(config_path)
@@ -430,6 +436,13 @@ class SimLingoInferenceBaseline:
         self.use_spline = use_spline
         self.spline_smoothing = max(0.0, float(spline_smoothing))
         self.spline_num_samples = spline_num_samples if spline_num_samples and spline_num_samples > 0 else None
+        if enable_vision_hooks is None:
+            enable_vision_hooks = self.explain_mode == "action"
+        if enable_language_hooks is None:
+            enable_language_hooks = True
+        self.enable_vision_hooks = enable_vision_hooks
+        self.enable_language_hooks = enable_language_hooks
+        self.skip_backward = skip_backward
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(
             self.cfg.model.vision_model.variant, trust_remote_code=True
@@ -497,20 +510,22 @@ class SimLingoInferenceBaseline:
     def _register_attention_hooks(self) -> None:
         """비전/언어 트랜스포머 블록 전체에 레코더 훅을 연결합니다."""
         # 비전 인코더 블록 훅 등록
-        vision_model = getattr(self.model.vision_model.image_encoder.model, "vision_model", None)
-        if vision_model is not None and hasattr(vision_model, "encoder"):
-            for idx, block in enumerate(vision_model.encoder.layers):
-                self.recorder.register_module(block, f"vision_block_{idx}")
+        if self.enable_vision_hooks:
+            vision_model = getattr(self.model.vision_model.image_encoder.model, "vision_model", None)
+            if vision_model is not None and hasattr(vision_model, "encoder"):
+                for idx, block in enumerate(vision_model.encoder.layers):
+                    self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
         # 언어 모델 블록 훅 등록
-        lm = self.model.language_model.model
-        if hasattr(lm, "model") and hasattr(lm.model, "layers"):
-            layers = lm.model.layers
-        elif hasattr(lm, "layers"):
-            layers = lm.layers
-        else:
-            layers = []
-        for idx, block in enumerate(layers):
-            self.recorder.register_module(block, f"language_block_{idx}")
+        if self.enable_language_hooks:
+            lm = self.model.language_model.model
+            if hasattr(lm, "model") and hasattr(lm.model, "layers"):
+                layers = lm.model.layers
+            elif hasattr(lm, "layers"):
+                layers = lm.layers
+            else:
+                layers = []
+            for idx, block in enumerate(layers):
+                self.recorder.register_module(block, f"language_block_{idx}")
 
     def _build_scenario_name(self, scenario_dir: Path) -> str:
         """시나리오 경로에서 정렬/원본, city 번호, 시나리오 번호를 추출해 접두어를 만듭니다."""
@@ -686,17 +701,19 @@ class SimLingoInferenceBaseline:
             pred_speed_wps, pred_route, _ = outputs
             text_features = self._gather_text_features()
             target_scalar, target_meta = self._compute_target_scalar(outputs, text_features)
-            if target_scalar is None:
-                raise RuntimeError("Target scalar could not be computed for relevance backprop.")
-            target_scalar.backward(retain_graph=False)
+            if not self.skip_backward:
+                if target_scalar is None:
+                    raise RuntimeError("Target scalar could not be computed for relevance backprop.")
+                target_scalar.backward(retain_graph=False)
             attention_maps = self.recorder.stop_recording()
-            self.model.zero_grad(set_to_none=True)
+            if not self.skip_backward:
+                self.model.zero_grad(set_to_none=True)
             payload = {
                 "tag": record_tag,
                 "image_path": str(image_path),
                 "input_speed_mps": current_speed,
                 "meta": meta,
-                "target_scalar": target_scalar.detach().to("cpu"),
+                "target_scalar": target_scalar.detach().to("cpu") if target_scalar is not None else None,
                 "target_info": target_meta,
                 "outputs": self._serialize_outputs(outputs),
                 "text_outputs": self._serialize_text_outputs(text_features),

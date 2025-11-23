@@ -81,6 +81,8 @@ class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
             explain_mode="text",
             text_token_strategy=text_token_strategy,
             text_token_index=text_token_index,
+            enable_vision_hooks=True,
+            enable_language_hooks=True,
         )
         cmap_name = colormap.upper()
         attr_name = f"COLORMAP_{cmap_name}"
