@@ -320,10 +320,23 @@ class AttentionRecorder:
     def _extract_attention(output) -> Optional[torch.Tensor]:
         if isinstance(output, torch.Tensor) and output.dim() == 4:
             return output
+        # Hugging Face blocks may return objects with .attentions list
+        if hasattr(output, "attentions"):
+            attn_obj = output.attentions
+            if isinstance(attn_obj, (list, tuple)) and attn_obj:
+                first = attn_obj[0]
+                if torch.is_tensor(first) and first.dim() == 4:
+                    return first
         if isinstance(output, (list, tuple)):
             for elem in output:
                 if torch.is_tensor(elem) and elem.dim() == 4:
                     return elem
+                if hasattr(elem, "attentions"):
+                    attn_obj = elem.attentions
+                    if isinstance(attn_obj, (list, tuple)) and attn_obj:
+                        first = attn_obj[0]
+                        if torch.is_tensor(first) and first.dim() == 4:
+                            return first
         return None
 
     def start_recording(self, tag: str) -> None:
