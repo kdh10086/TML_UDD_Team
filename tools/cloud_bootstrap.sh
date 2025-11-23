@@ -35,6 +35,12 @@ if command -v git >/dev/null 2>&1; then
   echo "[*] Git credential helper set to 'store' (tokens will be cached in ~/.git-credentials)."
 fi
 
+# Create expected directories
+mkdir -p "$REPO_ROOT/checkpoints"
+mkdir -p "$REPO_ROOT/data"
+mkdir -p "$REPO_ROOT/experiment_outputs/simlingo_inference"
+echo "[*] Created directories: checkpoints/, data/, experiment_outputs/simlingo_inference/"
+
 if command -v apt-get >/dev/null 2>&1; then
   echo "[*] Installing system packages (libgl1 ffmpeg git-lfs)..."
   if command -v sudo >/dev/null 2>&1; then

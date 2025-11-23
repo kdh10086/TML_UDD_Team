@@ -109,7 +109,15 @@ git config --global user.email "<your email>"
 ## 4) 체크포인트 및 샘플 데이터 다운로드
 ### SimLingo 체크포인트(HuggingFace)
 ```bash
-git lfs clone https://huggingface.co/RenzKa/simlingo
+cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
+```
+
+### Persistent Storage에 저장된 데이터셋을 /UDD_TML_Team/data/로 복사, 압축해제
+```bash
+#샘플 데이터셋 복사
+unzip /mnt/data1/sample_dataset.zip -d /root/TML_UDD_Team/data/
+#원본 데이터셋 복사 (옵션)
+unzip /mnt/data1/DREYEVE_DATA_filtered.zip -d /root/TML_UDD_Team/data/
 ```
 
 ## 5) 데이터 배치
@@ -186,5 +194,6 @@ python3 -m pip install --upgrade gdown
 cd /mnt/data1/
 #샘플 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
-gdown 
+#DREYEVE_DATA_filtered 데이터셋
+gdown (추가 예정) -O DREYEVE_DATA_filtered.zip
 ```
