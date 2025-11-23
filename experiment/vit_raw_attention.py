@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -46,6 +46,7 @@ class VisionRawAttention(SimLingoInferenceBaseline):
         colormap: str = "JET",
         alpha: float = 0.5,
         trajectory_overlay_root: Optional[Path] = None,
+        payload_root: Optional[Path] = None,
     ) -> None:
         super().__init__(
             config_path=config_path,
@@ -68,6 +69,8 @@ class VisionRawAttention(SimLingoInferenceBaseline):
             raise ValueError("alpha must lie between 0 and 1.")
         self.alpha = alpha
         self.trajectory_overlay_root = trajectory_overlay_root
+        self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
+        self._payload_index = self._index_payloads(self.payload_root)
 
     def generate_scene_heatmaps(self, scene_dir: Path, output_dir: Path, suffix: str = "vit_raw") -> None:
         scene_dir = Path(scene_dir)
@@ -75,7 +78,7 @@ class VisionRawAttention(SimLingoInferenceBaseline):
         if not scene_dir.exists():
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir.name, suffix)
+        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
         images_dir = scene_dir / "images"
         image_root = images_dir if images_dir.exists() else scene_dir
         image_paths = sorted(
@@ -94,6 +97,11 @@ class VisionRawAttention(SimLingoInferenceBaseline):
         speed_overlay_dir: Optional[Path],
     ) -> Path:
         record_tag = image_path.stem
+        cached_payload = self._load_cached_payload(record_tag)
+        if cached_payload is not None:
+            return self._process_cached_payload(
+                cached_payload, image_path, output_dir, suffix, route_overlay_dir, speed_overlay_dir
+            )
         self.recorder.start_recording(record_tag)
         driving_input, meta = self._prepare_driving_input(image_path)
         _ = self.model(driving_input)
@@ -103,6 +111,28 @@ class VisionRawAttention(SimLingoInferenceBaseline):
         token_scores = self._extract_image_scores(attention_tensor, meta["num_total_image_tokens"])
         heatmap = self._scores_to_heatmap(token_scores, meta)
         overlay = self._render_overlay(image_path, heatmap, record_tag, route_overlay_dir, speed_overlay_dir)
+        output_path = output_dir / f"{image_path.stem}_{suffix}.png"
+        Image.fromarray(overlay).save(output_path)
+        return output_path
+
+    def _process_cached_payload(
+        self,
+        payload: Dict[str, Any],
+        image_path: Path,
+        output_dir: Path,
+        suffix: str,
+        route_overlay_dir: Optional[Path],
+        speed_overlay_dir: Optional[Path],
+    ) -> Path:
+        attention_maps = payload.get("attention") or {}
+        meta = payload.get("meta")
+        if not attention_maps or meta is None:
+            raise RuntimeError("Cached payload is missing attention/meta for raw attention rendering.")
+        moved = self._move_attention_maps_to_device(attention_maps, self.device)
+        attention_tensor = self._select_layer_attention(moved)
+        token_scores = self._extract_image_scores(attention_tensor, meta["num_total_image_tokens"])
+        heatmap = self._scores_to_heatmap(token_scores, meta)
+        overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)
         output_path = output_dir / f"{image_path.stem}_{suffix}.png"
         Image.fromarray(overlay).save(output_path)
         return output_path
@@ -191,6 +221,63 @@ class VisionRawAttention(SimLingoInferenceBaseline):
         blended = overlay_trajectories(blended, record_tag, route_overlay_dir, speed_overlay_dir)
         return np.uint8(255 * blended)
 
+    @staticmethod
+    def _move_attention_maps_to_device(
+        attention: Dict[str, Sequence[Dict[str, torch.Tensor]]], device: Optional[torch.device] = None
+    ) -> Dict[str, List[Dict[str, torch.Tensor]]]:
+        device = device or torch.device("cpu")
+        moved: Dict[str, List[Dict[str, torch.Tensor]]] = {}
+        for name, entries in attention.items():
+            moved[name] = []
+            for entry in entries:
+                moved_entry = {
+                    "attn": entry["attn"].to(device) if entry.get("attn") is not None else None,
+                    "grad": entry["grad"].to(device) if entry.get("grad") is not None else None,
+                }
+                moved[name].append(moved_entry)
+        return moved
+
+    @staticmethod
+    def _resolve_payload_root(
+        explicit: Optional[Path], overlay_root: Optional[Path]
+    ) -> Optional[Path]:
+        candidates: List[Path] = []
+
+        def add_base(path_like: Optional[Path]) -> None:
+            if path_like is None:
+                return
+            base = Path(path_like)
+            candidates.extend([base, base / "pt"])
+            if base.name in {"route_overlay", "speed_overlay", "pt"}:
+                candidates.extend([base.parent, base.parent / "pt"])
+
+        add_base(explicit)
+        add_base(overlay_root)
+
+        for cand in candidates:
+            if cand is None:
+                continue
+            if cand.exists() and cand.is_dir() and any(cand.glob("*.pt")):
+                return cand
+        return None
+
+    @staticmethod
+    def _index_payloads(payload_root: Optional[Path]) -> Dict[str, Path]:
+        if payload_root is None:
+            return {}
+        return {p.stem: p for p in Path(payload_root).glob("*.pt")}
+
+    def _load_cached_payload(self, tag: str) -> Optional[Dict[str, Any]]:
+        if not self._payload_index:
+            return None
+        payload_path = self._payload_index.get(tag)
+        if payload_path is None:
+            return None
+        payload = torch.load(payload_path, map_location="cpu")
+        if not payload.get("attention"):
+            return None
+        return payload
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sim-Lingo ViT raw-attention generator")
@@ -221,6 +308,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to Sim-Lingo inference output (expects route_overlay/speed_overlay subdirs).",
     )
+    parser.add_argument(
+        "--payload_root",
+        type=Path,
+        default=None,
+        help="Optional path to cached Sim-Lingo inference pt directory (or its parent).",
+    )
     return parser.parse_args()
 
 
@@ -235,6 +328,7 @@ def main() -> None:
         colormap=args.colormap,
         alpha=args.alpha,
         trajectory_overlay_root=args.trajectory_overlay_root,
+        payload_root=args.payload_root,
     )
     runner.generate_scene_heatmaps(args.scene_dir, args.output_dir, suffix=args.suffix)
 

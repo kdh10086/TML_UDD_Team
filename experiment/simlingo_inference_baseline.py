@@ -38,6 +38,9 @@ from simlingo_training.models.driving import DrivingModel
 from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
 from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
 from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics, project_points
+from experiment.simlingo_patches import patch_simlingo
+
+patch_simlingo()
 
 DEFAULT_CONFIG_PATH = Path("checkpoints/simlingo/simlingo/.hydra/config.yaml")  # 기본 Hydra config
 DEFAULT_CHECKPOINT_PATH = Path("checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt")  # 기본 ckpt
@@ -879,6 +882,13 @@ class SimLingoInferenceBaseline:
         """모델이 방금 생성한 토큰 ID·로짓·문자열을 추출합니다."""
         token_id_seq = getattr(self.model, "text_token_ids", None)
         token_logit_seq = getattr(self.model, "text_token_logits", None)
+        if (not token_id_seq or not token_logit_seq) and hasattr(self.model, "language_model"):
+            lm = getattr(self.model, "language_model", None)
+            last_tokens = getattr(lm, "last_sampled_tokens", None)
+            last_scores = getattr(lm, "last_sampled_token_scores", None)
+            if last_tokens is not None and last_scores is not None:
+                token_id_seq = [last_tokens]
+                token_logit_seq = [last_scores]
         if not token_id_seq or not token_logit_seq:
             return None
         token_ids = token_id_seq[0]

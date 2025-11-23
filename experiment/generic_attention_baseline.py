@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -71,6 +71,7 @@ class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
         colormap: str = "JET",
         alpha: float = 0.5,
         trajectory_overlay_root: Optional[Path] = None,
+        payload_root: Optional[Path] = None,
     ) -> None:
         super().__init__(
             config_path=config_path,
@@ -91,6 +92,8 @@ class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
         self.alpha = alpha
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
         self.trajectory_overlay_root = trajectory_overlay_root
+        self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
+        self._payload_index = self._index_payloads(self.payload_root)
 
     def generate_scene_heatmaps(self, scene_dir: Path, output_dir: Path, suffix: str = "generic_text") -> None:
         """scene_dir 내 이미지들에 대해 히트맵을 생성하고 저장한다."""
@@ -99,7 +102,7 @@ class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
         if not scene_dir.exists():
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir.name, suffix)
+        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
         images_dir = scene_dir / "images"
         image_root = images_dir if images_dir.exists() else scene_dir
         image_paths = sorted(
@@ -118,6 +121,12 @@ class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
         speed_overlay_dir: Optional[Path],
     ) -> Path:
         record_tag = image_path.stem
+        cached_payload = self._load_cached_payload(record_tag)
+        if cached_payload is not None:
+            return self._process_cached_payload(
+                cached_payload, image_path, output_dir, suffix, route_overlay_dir, speed_overlay_dir
+            )
+
         self.recorder.start_recording(record_tag)
         driving_input, meta, prompt_token_ids = self._prepare_driving_input_with_prompt(image_path)
         outputs = self.model(driving_input)
@@ -148,6 +157,55 @@ class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
         token_scores = relevance[source_index, image_token_positions]
         heatmap = self._scores_to_heatmap(token_scores, meta)
         overlay = self._render_overlay(image_path, heatmap, record_tag, route_overlay_dir, speed_overlay_dir)
+        output_path = output_dir / f"{image_path.stem}_{suffix}.png"
+        Image.fromarray(overlay).save(output_path)
+        return output_path
+
+    def _process_cached_payload(
+        self,
+        payload: Dict[str, Any],
+        image_path: Path,
+        output_dir: Path,
+        suffix: str,
+        route_overlay_dir: Optional[Path],
+        speed_overlay_dir: Optional[Path],
+    ) -> Path:
+        attention_maps = payload.get("attention") or {}
+        text_outputs = payload.get("text_outputs")
+        target_info = payload.get("target_info", {})
+        if not attention_maps or text_outputs is None or target_info.get("type") != "text":
+            raise RuntimeError("Cached payload is missing attention/text info for text-mode Generic Attention.")
+        meta = payload["meta"]
+        prompt_token_ids = self._rebuild_prompt_token_ids(meta, payload.get("input_speed_mps", 0.0))
+        moved_attention = self._move_attention_maps_to_device(attention_maps, self.device)
+        token_ids = torch.tensor(text_outputs["token_ids"], device=self.device)
+        token_scores = torch.tensor(text_outputs["token_scores"], device=self.device)
+        text_features = {
+            "token_ids": token_ids,
+            "token_scores": token_scores,
+            "token_strings": text_outputs.get("token_strings", []),
+            "decoded_text": text_outputs.get("decoded_text", ""),
+        }
+        relevance = self._compute_language_relevance(moved_attention)
+        prompt_len = len(prompt_token_ids)
+        generated_len = len(text_outputs.get("token_ids", []))
+        seq_len = relevance.shape[0]
+        if seq_len < prompt_len + generated_len:
+            raise RuntimeError(
+                f"Recorded sequence ({seq_len}) shorter than prompt+generated tokens ({prompt_len + generated_len})."
+            )
+        token_index = int(target_info.get("token_index", generated_len - 1))
+        source_index = prompt_len + token_index
+        if source_index >= seq_len:
+            raise IndexError(
+                f"Target token index ({source_index}) exceeds recorded attention sequence ({seq_len})."
+            )
+        image_token_positions = self._select_image_token_positions(
+            prompt_token_ids, meta["num_total_image_tokens"]
+        )
+        token_scores = relevance[source_index, image_token_positions]
+        heatmap = self._scores_to_heatmap(token_scores, meta)
+        overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)
         output_path = output_dir / f"{image_path.stem}_{suffix}.png"
         Image.fromarray(overlay).save(output_path)
         return output_path
@@ -219,6 +277,76 @@ class GenericAttentionTextVisualizer(SimLingoInferenceBaseline):
             )
         return positions[:expected]
 
+    @staticmethod
+    def _move_attention_maps_to_device(
+        attention: Dict[str, Sequence[Dict[str, torch.Tensor]]], device: Optional[torch.device] = None
+    ) -> Dict[str, List[Dict[str, torch.Tensor]]]:
+        device = device or torch.device("cpu")
+        moved: Dict[str, List[Dict[str, torch.Tensor]]] = {}
+        for name, entries in attention.items():
+            moved[name] = []
+            for entry in entries:
+                moved_entry = {
+                    "attn": entry["attn"].to(device) if entry.get("attn") is not None else None,
+                    "grad": entry["grad"].to(device) if entry.get("grad") is not None else None,
+                }
+                moved[name].append(moved_entry)
+        return moved
+
+    def _rebuild_prompt_token_ids(self, meta: Dict[str, Any], current_speed: float) -> List[int]:
+        """기존 추론과 동일한 프롬프트로 <IMG_CONTEXT> 위치를 복원한다."""
+        placeholder_batch_list: List[dict] = []
+        prompt_str = (
+            f"Current speed: {current_speed:.1f} m/s. What should the ego vehicle do next? Provide a short commentary."
+        )
+        lang_label = self._build_language_label(prompt_str, placeholder_batch_list, meta["num_patch_views"])
+        return self._extract_prompt_token_ids(lang_label)
+
+    @staticmethod
+    def _resolve_payload_root(
+        explicit: Optional[Path], overlay_root: Optional[Path]
+    ) -> Optional[Path]:
+        candidates: List[Path] = []
+
+        def add_base(path_like: Optional[Path]) -> None:
+            if path_like is None:
+                return
+            base = Path(path_like)
+            candidates.extend([base, base / "pt"])
+            if base.name in {"route_overlay", "speed_overlay", "pt"}:
+                candidates.extend([base.parent, base.parent / "pt"])
+
+        add_base(explicit)
+        add_base(overlay_root)
+
+        for cand in candidates:
+            if cand is None:
+                continue
+            if cand.exists() and cand.is_dir() and any(cand.glob("*.pt")):
+                return cand
+        return None
+
+    @staticmethod
+    def _index_payloads(payload_root: Optional[Path]) -> Dict[str, Path]:
+        if payload_root is None:
+            return {}
+        return {p.stem: p for p in Path(payload_root).glob("*.pt")}
+
+    def _load_cached_payload(self, tag: str) -> Optional[Dict[str, Any]]:
+        if not self._payload_index:
+            return None
+        payload_path = self._payload_index.get(tag)
+        if payload_path is None:
+            return None
+        payload = torch.load(payload_path, map_location="cpu")
+        if payload.get("mode") != "text":
+            return None
+        if not payload.get("attention"):
+            return None
+        if payload.get("text_outputs") is None:
+            return None
+        return payload
+
     def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
         num_views = int(meta["num_patch_views"])
         tokens_per_view = int(meta["num_image_tokens_per_patch"])
@@ -286,6 +414,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to Sim-Lingo inference output (expects route_overlay/speed_overlay subdirs).",
     )
+    parser.add_argument(
+        "--payload_root",
+        type=Path,
+        default=None,
+        help="Optional path to cached Sim-Lingo inference pt directory (or its parent).",
+    )
     return parser.parse_args()
 
 
@@ -300,6 +434,7 @@ def main() -> None:
         colormap=args.colormap,
         alpha=args.alpha,
         trajectory_overlay_root=args.trajectory_overlay_root,
+        payload_root=args.payload_root,
     )
     runner.generate_scene_heatmaps(args.scene_dir, args.output_dir, suffix=args.suffix)
 
