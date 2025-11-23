@@ -146,13 +146,21 @@ class VisionRawAttention(SimLingoInferenceBaseline):
         items = [(name, entries) for name, entries in attention_maps.items() if "vision_block" in name]
         if not items:
             raise RuntimeError("No vision block attention maps were recorded.")
-        items.sort(key=lambda kv: int(kv[0].split("_")[-1]))
+        items.sort(key=lambda kv: int(kv[0].split("_")[-1]) if kv[0].split("_")[-1].isdigit() else 0)
         matrices: List[torch.Tensor] = []
         for _, entries in items:
             tensors = [entry["attn"] for entry in entries if entry.get("attn") is not None]
             if not tensors:
                 continue
-            stacked = torch.stack(tensors, dim=0).mean(dim=0)
+            merged: List[torch.Tensor] = []
+            for t in tensors:
+                if t.dim() == 5:  # [L,B,H,S,S]
+                    merged.extend([t_layer for t_layer in t])
+                else:
+                    merged.append(t)
+            if not merged:
+                continue
+            stacked = torch.stack(merged, dim=0).mean(dim=0)
             if stacked.dim() == 3:
                 stacked = stacked.unsqueeze(0)
             matrices.append(stacked)

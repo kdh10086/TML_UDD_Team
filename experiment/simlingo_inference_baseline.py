@@ -327,9 +327,11 @@ class AttentionRecorder:
         if hasattr(output, "attentions"):
             attn_obj = output.attentions
             if isinstance(attn_obj, (list, tuple)) and attn_obj:
-                first = attn_obj[0]
-                if torch.is_tensor(first) and first.dim() == 4:
-                    return first
+                if all(torch.is_tensor(x) and x.dim() == 4 for x in attn_obj):
+                    try:
+                        return torch.stack(attn_obj, dim=0)  # [L,B,H,S,S]
+                    except Exception:
+                        return attn_obj[0]
         if isinstance(output, (list, tuple)):
             for elem in output:
                 if torch.is_tensor(elem) and elem.dim() == 4:
@@ -337,9 +339,11 @@ class AttentionRecorder:
                 if hasattr(elem, "attentions"):
                     attn_obj = elem.attentions
                     if isinstance(attn_obj, (list, tuple)) and attn_obj:
-                        first = attn_obj[0]
-                        if torch.is_tensor(first) and first.dim() == 4:
-                            return first
+                        if all(torch.is_tensor(x) and x.dim() == 4 for x in attn_obj):
+                            try:
+                                return torch.stack(attn_obj, dim=0)
+                            except Exception:
+                                return attn_obj[0]
         return None
 
     def start_recording(self, tag: str) -> None:
@@ -512,9 +516,12 @@ class SimLingoInferenceBaseline:
         # 비전 인코더 블록 훅 등록
         if self.enable_vision_hooks:
             vision_model = getattr(self.model.vision_model.image_encoder.model, "vision_model", None)
-            if vision_model is not None and hasattr(vision_model, "encoder"):
-                for idx, block in enumerate(vision_model.encoder.layers):
-                    self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
+            if vision_model is not None:
+                # hook the top module to capture attentions list
+                self.recorder.register_module(vision_model, "vision_block_top", record_grad=False)
+                if hasattr(vision_model, "encoder"):
+                    for idx, block in enumerate(vision_model.encoder.layers):
+                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
