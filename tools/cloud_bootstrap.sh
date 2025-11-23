@@ -24,6 +24,12 @@ else
   echo "[*] Public key already present in authorized_keys."
 fi
 
+# Configure Git to store credentials to avoid repeated token prompts
+if command -v git >/dev/null 2>&1; then
+  git config --global credential.helper store
+  echo "[*] Git credential helper set to 'store' (tokens will be cached in ~/.git-credentials)."
+fi
+
 if command -v apt-get >/dev/null 2>&1; then
   echo "[*] Installing system packages (libgl1 ffmpeg git-lfs)..."
   if command -v sudo >/dev/null 2>&1; then
