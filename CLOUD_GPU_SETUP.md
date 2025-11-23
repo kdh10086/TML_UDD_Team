@@ -76,7 +76,7 @@ ssh remote_gpu
 ## 2) 원클릭 부트스트랩 (클론+의존성 설치 한 번에)
 이미 SSH 접속한 상태에서 아래 한 줄로 클론 → LFS → 의존성 설치까지 실행:
 ```bash
-git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD_Team && bash tools/cloud_bootstrap.sh
+git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD_Team && chmod +x tools/cloud_bootstrap.sh && bash tools/cloud_bootstrap.sh
 ```
 스크립트가 libgl1/ffmpeg/git-lfs 설치, git lfs pull, requirements 설치를 수행하고,
 남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
