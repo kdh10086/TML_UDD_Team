@@ -49,6 +49,9 @@ DEFAULT_IMAGE_SIZE = 224  # 입력 리사이즈 (기본 448 : 메모리 절감 �
 DEFAULT_MAX_PATCHES = 2  # dynamic_preprocess max_num (기본 2 : 메모리 절감 필요 시 1 - (우선순위 2))
 DEFAULT_FRAMES_SUBDIR = "video_garmin"
 DEFAULT_SPEED_SUBDIR = "video_garmin_speed"
+DEFAULT_USE_SPLINE = True
+DEFAULT_SPLINE_SMOOTHING = 0.0  # 2차 차분(곡률) 페널티 강도 λ
+DEFAULT_SPLINE_NUM_SAMPLES = 0  # 0이면 입력 포인트 개수 유지
 
 EPS = 1e-6
 DELTA_S = 1.0
@@ -61,24 +64,142 @@ def _ensure_batch(x: torch.Tensor) -> torch.Tensor:
     return x.float()
 
 
+def _build_second_diff_matrix(n: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """2차 차분 행렬 D (shape: (n-2, n))을 생성합니다."""
+    if n < 3:
+        return torch.zeros((0, n), device=device, dtype=dtype)
+    main = torch.full((n - 2,), -2.0, device=device, dtype=dtype)
+    D = torch.zeros((n - 2, n), device=device, dtype=dtype)
+    row_idx = torch.arange(n - 2, device=device)
+    D[row_idx, row_idx] = 1.0
+    D[row_idx, row_idx + 1] = main
+    D[row_idx, row_idx + 2] = 1.0
+    # off-diagonals already placed via indexing; 'off' variable unused but kept for clarity
+    return D
+
+
+def _parametric_cubic_smoothing_resample(
+    points: torch.Tensor,
+    smoothing: float = 0.0,
+    num_samples: Optional[int] = None,
+    param: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """입력 포인트(배치 가능)를 매끄럽게 한 뒤 파라메트릭 cubic Hermite spline으로 리샘플합니다.
+
+    - smoothing: 0이면 원본 유지, 양수이면 2차 차분 페널티를 준 평활화(Whittaker 형태).
+    - num_samples: 0/None이면 입력 포인트 개수를 유지합니다.
+    - param: 길이 N의 1D (또는 B×N) 파라미터 축을 직접 지정할 수 있습니다. None이면
+      호길이 기반 정규화 파라미터를 사용합니다.
+    모든 연산을 torch에서 수행해 그래디언트가 끊기지 않습니다.
+    """
+    points = _ensure_batch(points)
+    orig_dtype = points.dtype
+    work_dtype = torch.float32 if orig_dtype in (torch.float16, torch.bfloat16) else orig_dtype
+    points = points.to(work_dtype)
+    B, N, _ = points.shape
+    if N < 2:
+        return points
+    device = points.device
+    dtype = points.dtype
+    target_samples = num_samples if num_samples and num_samples > 0 else N
+
+    # 파라메터 t: 외부 파라미터(시간 등) 또는 호 길이 정규화 [0, 1]
+    if param is not None:
+        param = param.to(device=device, dtype=dtype)
+        if param.dim() == 1:
+            param = param.unsqueeze(0).expand(B, -1)
+        t = param - param[:, :1]
+    else:
+        diffs = points[:, 1:, :] - points[:, :-1, :]
+        seglen = diffs.norm(dim=-1)
+        t = torch.zeros((B, N), device=device, dtype=dtype)
+        t[:, 1:] = torch.cumsum(seglen, dim=1)
+    total = t[:, -1:].clamp_min(EPS)
+    t = t / total
+
+    smoothed = points
+    if smoothing > 0.0 and N >= 3:
+        D = _build_second_diff_matrix(N, device=device, dtype=dtype)
+        penalty = D.transpose(0, 1) @ D  # (N, N)
+        A = torch.eye(N, device=device, dtype=dtype) + smoothing * penalty
+        # broadcast solve over batch (A: (N,N) -> (B,N,N))
+        A_batch = A.unsqueeze(0).expand(B, -1, -1)
+        smoothed = torch.linalg.solve(A_batch, points)
+
+    # 접선 벡터 (Catmull-Rom 스타일)
+    tangents = torch.zeros_like(smoothed)
+    dt_forward = (t[:, 2:] - t[:, :-2]).clamp_min(EPS)
+    tangents[:, 1:-1, :] = (smoothed[:, 2:, :] - smoothed[:, :-2, :]) / dt_forward.unsqueeze(-1)
+    tangents[:, 0, :] = (smoothed[:, 1, :] - smoothed[:, 0, :]) / (t[:, 1] - t[:, 0]).clamp_min(EPS).unsqueeze(-1)
+    tangents[:, -1, :] = (smoothed[:, -1, :] - smoothed[:, -2, :]) / (t[:, -1] - t[:, -2]).clamp_min(EPS).unsqueeze(-1)
+
+    # 타깃 샘플 위치
+    t_query = torch.linspace(0, 1, target_samples, device=device, dtype=dtype)
+    t_query = t_query.unsqueeze(0).expand(B, -1)  # (B, M)
+
+    # 각 샘플이 속하는 구간 인덱스 찾기
+    idx = torch.searchsorted(t, t_query, right=True)
+    idx = idx.clamp(1, N - 1)
+    idx_prev = idx - 1
+
+    def _gather(batch_tensor: torch.Tensor, gather_idx: torch.Tensor) -> torch.Tensor:
+        gather_idx_expanded = gather_idx.unsqueeze(-1).expand(-1, -1, batch_tensor.size(-1))
+        return torch.gather(batch_tensor, 1, gather_idx_expanded)
+
+    t0 = torch.gather(t, 1, idx_prev)
+    t1 = torch.gather(t, 1, idx)
+    p0 = _gather(smoothed, idx_prev)
+    p1 = _gather(smoothed, idx)
+    m0 = _gather(tangents, idx_prev)
+    m1 = _gather(tangents, idx)
+
+    h = (t1 - t0).clamp_min(EPS).unsqueeze(-1)  # (B, M, 1)
+    u = ((t_query - t0) / (t1 - t0).clamp_min(EPS)).unsqueeze(-1)  # (B, M, 1)
+
+    u2 = u * u
+    u3 = u2 * u
+    h00 = 2 * u3 - 3 * u2 + 1
+    h10 = u3 - 2 * u2 + u
+    h01 = -2 * u3 + 3 * u2
+    h11 = u3 - u2
+
+    resampled = (
+        h00 * p0
+        + h10 * h * m0
+        + h01 * p1
+        + h11 * h * m1
+    )
+    return resampled.to(dtype=orig_dtype)
+
+
 # pred_route -> 곡률 제곱합 (조향 강도)
-def compute_curvature_energy(route: torch.Tensor, delta_s: float = DELTA_S) -> torch.Tensor:
+def compute_curvature_energy(route: torch.Tensor, delta_s: Optional[float] = None) -> torch.Tensor:
     route = _ensure_batch(route)
     diffs = route[:, 1:, :] - route[:, :-1, :]
-    tangent = diffs / (diffs.norm(dim=-1, keepdim=True).clamp_min(EPS))
+    seglen = diffs.norm(dim=-1).clamp_min(EPS)
+    tangent = diffs / seglen.unsqueeze(-1)
     headings = torch.atan2(tangent[..., 1], tangent[..., 0])
     heading_diff = headings[:, 1:] - headings[:, :-1]
-    curvature = heading_diff / delta_s
+    if delta_s is not None:
+        curvature = heading_diff / delta_s
+    else:
+        ds = (seglen[:, 1:] + seglen[:, :-1]) * 0.5
+        curvature = heading_diff / ds.clamp_min(EPS)
     return (curvature ** 2).sum()
 
 
 # pred_route -> 곡률 변화 제곱합 (조향 부드러움/jerk)
-def compute_curvature_diff(route: torch.Tensor, delta_s: float = DELTA_S) -> torch.Tensor:
+def compute_curvature_diff(route: torch.Tensor, delta_s: Optional[float] = None) -> torch.Tensor:
     route = _ensure_batch(route)
     diffs = route[:, 1:, :] - route[:, :-1, :]
-    tangent = diffs / (diffs.norm(dim=-1, keepdim=True).clamp_min(EPS))
+    seglen = diffs.norm(dim=-1).clamp_min(EPS)
+    tangent = diffs / seglen.unsqueeze(-1)
     headings = torch.atan2(tangent[..., 1], tangent[..., 0])
-    curvature = (headings[:, 1:] - headings[:, :-1]) / delta_s
+    if delta_s is not None:
+        curvature = (headings[:, 1:] - headings[:, :-1]) / delta_s
+    else:
+        ds = (seglen[:, 1:] + seglen[:, :-1]) * 0.5
+        curvature = (headings[:, 1:] - headings[:, :-1]) / ds.clamp_min(EPS)
     curvature_diff = curvature[:, 1:] - curvature[:, :-1]
     return (curvature_diff ** 2).sum()
 
@@ -95,40 +216,40 @@ def compute_longitudinal_progress(speed_wps: torch.Tensor) -> torch.Tensor:
 
 
 # pred_speed -> 속도/가속도/jerk를 종방향 축으로 투영해 계산 (내부 헬퍼 함수)
-def _derive_longitudinal_terms(speed_wps: torch.Tensor):
+def _derive_longitudinal_terms(speed_wps: torch.Tensor, delta_t: float = DELTA_T):
     speed_wps = _ensure_batch(speed_wps)
     diffs = speed_wps[:, 1:, :] - speed_wps[:, :-1, :]
     base_dir = diffs[:, :1, :]
     norm = base_dir.norm(dim=-1, keepdim=True).clamp_min(EPS)
     direction = base_dir / norm
-    velocities = (diffs * direction).sum(dim=-1) / DELTA_T
-    accelerations = (velocities[:, 1:] - velocities[:, :-1]) / DELTA_T
-    jerks = (accelerations[:, 1:] - accelerations[:, :-1]) / DELTA_T
+    velocities = (diffs * direction).sum(dim=-1) / max(delta_t, EPS)
+    accelerations = (velocities[:, 1:] - velocities[:, :-1]) / max(delta_t, EPS)
+    jerks = (accelerations[:, 1:] - accelerations[:, :-1]) / max(delta_t, EPS)
     return velocities, accelerations, jerks
 
 
 # pred_speed -> 평균 전진 속도 (양수 성분)
-def compute_forward_speed(speed_wps: torch.Tensor) -> torch.Tensor:
-    velocities, _, _ = _derive_longitudinal_terms(speed_wps)
+def compute_forward_speed(speed_wps: torch.Tensor, delta_t: float = DELTA_T) -> torch.Tensor:
+    velocities, _, _ = _derive_longitudinal_terms(speed_wps, delta_t=delta_t)
     return torch.relu(velocities).mean()
 
 
 # pred_speed -> 가속도 에너지 (승차감/동적 강도)
-def compute_acceleration_energy(speed_wps: torch.Tensor) -> torch.Tensor:
-    _, accelerations, _ = _derive_longitudinal_terms(speed_wps)
+def compute_acceleration_energy(speed_wps: torch.Tensor, delta_t: float = DELTA_T) -> torch.Tensor:
+    _, accelerations, _ = _derive_longitudinal_terms(speed_wps, delta_t=delta_t)
     return (accelerations ** 2).sum()
 
 
 # pred_speed -> 제동 에너지 (감속 위험)
-def compute_brake_energy(speed_wps: torch.Tensor) -> torch.Tensor:
-    _, accelerations, _ = _derive_longitudinal_terms(speed_wps)
+def compute_brake_energy(speed_wps: torch.Tensor, delta_t: float = DELTA_T) -> torch.Tensor:
+    _, accelerations, _ = _derive_longitudinal_terms(speed_wps, delta_t=delta_t)
     braking = torch.relu(-accelerations)
     return (braking ** 2).sum()
 
 
 # pred_speed -> jerk 에너지 (가속도 변화량)
-def compute_jerk_energy(speed_wps: torch.Tensor) -> torch.Tensor:
-    _, _, jerks = _derive_longitudinal_terms(speed_wps)
+def compute_jerk_energy(speed_wps: torch.Tensor, delta_t: float = DELTA_T) -> torch.Tensor:
+    _, _, jerks = _derive_longitudinal_terms(speed_wps, delta_t=delta_t)
     return (jerks ** 2).sum()
 
 
@@ -261,6 +382,9 @@ class SimLingoInferenceBaseline:
         max_patches: int = DEFAULT_MAX_PATCHES,
         frames_subdir: str = DEFAULT_FRAMES_SUBDIR,
         speed_subdir: str = DEFAULT_SPEED_SUBDIR,
+        use_spline: bool = DEFAULT_USE_SPLINE,
+        spline_smoothing: float = DEFAULT_SPLINE_SMOOTHING,
+        spline_num_samples: int = DEFAULT_SPLINE_NUM_SAMPLES,
     ) -> None:
         config_path = config_path or DEFAULT_CONFIG_PATH
         self.config_path = Path(config_path)
@@ -287,6 +411,9 @@ class SimLingoInferenceBaseline:
         self.max_patches = max_patches
         self.frames_subdir = frames_subdir
         self.speed_subdir = speed_subdir
+        self.use_spline = use_spline
+        self.spline_smoothing = max(0.0, float(spline_smoothing))
+        self.spline_num_samples = spline_num_samples if spline_num_samples and spline_num_samples > 0 else None
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(
             self.cfg.model.vision_model.variant, trust_remote_code=True
@@ -630,6 +757,45 @@ class SimLingoInferenceBaseline:
             return self._compute_text_target(text_features)
         return self._compute_action_target(outputs)
 
+    def _apply_parametric_spline(
+        self, tensor: Optional[torch.Tensor], head: Optional[str] = None
+    ) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
+        """필요 시 파라메트릭 cubic smoothing spline으로 리샘플합니다."""
+        meta = {"applied": False}
+        if tensor is None or not self.use_spline:
+            return tensor, meta
+        orig_len = tensor.shape[1] if tensor.dim() >= 2 else 0
+        duration = None
+        param = None
+        if head == "speed" and orig_len > 1:
+            duration = DELTA_T * (orig_len - 1)
+            param = torch.linspace(
+                0.0,
+                duration,
+                steps=orig_len,
+                device=tensor.device,
+                dtype=tensor.dtype if tensor.is_floating_point() else torch.float32,
+            )
+        resampled = _parametric_cubic_smoothing_resample(
+            tensor,
+            smoothing=self.spline_smoothing,
+            num_samples=self.spline_num_samples,
+            param=param,
+        )
+        effective_dt = None
+        if duration is not None and resampled is not None and resampled.shape[1] > 1:
+            effective_dt = duration / (resampled.shape[1] - 1)
+        meta.update(
+            {
+                "applied": True,
+                "smoothing": self.spline_smoothing,
+                "num_samples": resampled.shape[1] if resampled is not None else None,
+                "duration": duration,
+                "effective_dt": effective_dt,
+            }
+        )
+        return resampled, meta
+
     def _compute_action_target(self, outputs) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
         """선택한 운동학 함수로 pred_route/pred_speed에서 스칼라 y_t를 계산합니다."""
         pred_speed_wps, pred_route, _ = outputs
@@ -651,17 +817,25 @@ class SimLingoInferenceBaseline:
             tensor = pred_speed_wps
             meta["head"] = "speed"
 
+        tensor, spline_meta = self._apply_parametric_spline(tensor, head=meta["head"])
+        meta["spline"] = spline_meta
+
         if metric_fn is not None:
             if tensor is None:
                 return None, meta
-            return metric_fn(tensor), meta
+            metric_kwargs = {}
+            if meta["head"] == "speed":
+                dt = spline_meta.get("effective_dt")
+                if dt is not None:
+                    metric_kwargs["delta_t"] = float(dt)
+            return metric_fn(tensor, **metric_kwargs), meta
 
-        if self.target_mode in ("auto", "route") and pred_route is not None:
+        if self.target_mode in ("auto", "route") and meta.get("head") == "route" and tensor is not None:
             meta["head"] = "route"
-            return pred_route.float().abs().sum(), meta
-        if self.target_mode in ("auto", "speed") and pred_speed_wps is not None:
+            return tensor.float().abs().sum(), meta
+        if self.target_mode in ("auto", "speed") and meta.get("head") == "speed" and tensor is not None:
             meta["head"] = "speed"
-            return pred_speed_wps.float().abs().sum(), meta
+            return tensor.float().abs().sum(), meta
         return None, meta
 
     def _compute_text_target(
@@ -955,6 +1129,23 @@ def parse_args():
         default=DEFAULT_SPEED_SUBDIR,
         help="Subdirectory under scene_dir containing per-frame speed txt (m/s) (default: video_garmin_speed).",
     )
+    parser.add_argument(
+        "--use_spline",
+        action="store_true",
+        help="Enable parametric cubic smoothing spline on route/speed waypoints before kinematic metrics.",
+    )
+    parser.add_argument(
+        "--spline_smoothing",
+        type=float,
+        default=DEFAULT_SPLINE_SMOOTHING,
+        help="Non-negative smoothing strength (second-derivative penalty). 0 keeps raw points.",
+    )
+    parser.add_argument(
+        "--spline_num_samples",
+        type=int,
+        default=DEFAULT_SPLINE_NUM_SAMPLES,
+        help="Number of samples to evaluate on the spline. 0 keeps the original waypoint count.",
+    )
     return parser.parse_args()
 
 
@@ -974,6 +1165,9 @@ def main():
         max_patches=args.max_patches,
         frames_subdir=args.frames_subdir,
         speed_subdir=args.speed_subdir,
+        use_spline=args.use_spline,
+        spline_smoothing=args.spline_smoothing,
+        spline_num_samples=args.spline_num_samples,
     )
     runner.run_scene(args.scene_dir, args.output_dir)
 
