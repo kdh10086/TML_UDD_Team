@@ -147,6 +147,35 @@ PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
 - tqdm로 시나리오 단위 진행률 표시.
 - 입력 속도는 `video_garmin_speed`의 m/s를 자동 주입. 없으면 0 m/s 폴백.
 
+## 6-1) ViT 어텐션 시각화만 실행 (모델 재실행 없이 캐시 재사용)
+- 전제: `simlingo_inference_baseline`로 생성된 `.pt`에 어텐션이 포함돼 있어야 함(`experiment_outputs/simlingo_inference/.../pt/*.pt`).
+- 루트에서 실행 예시(샘플 데이터, 액션 모드 캐시):
+```bash
+# Raw attention
+python -m experiment.vit_raw_attention \
+  --scene_dir data/sample_scene \
+  --output_dir experiment_outputs/vit_raw \
+  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207
+
+# Attention rollout
+python -m experiment.vit_attention_rollout \
+  --scene_dir data/sample_scene \
+  --output_dir experiment_outputs/vit_rollout \
+  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --residual_alpha 0.5 --start_layer 0
+
+# Attention flow
+python -m experiment.vit_attention_flow \
+  --scene_dir data/sample_scene \
+  --output_dir experiment_outputs/vit_flow \
+  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --residual_alpha 0.5 --discard_ratio 0.0
+```
+- `--payload_root`에 `.pt`가 없거나 어텐션이 비어 있으면 모델을 다시 실행하므로 VRAM이 부족할 수 있음. 캐시가 유효한지 먼저 확인하세요.
+
 ## 7) 기타
 - FlashAttention2 미설치 시 경고만 출력, 동작에는 문제 없음.
 - HF 모델 캐시 경로를 커스텀하려면 환경변수 `HF_HOME` 설정.
