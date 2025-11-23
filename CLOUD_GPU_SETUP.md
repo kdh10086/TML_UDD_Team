@@ -109,7 +109,8 @@ git config --global user.email "<your email>"
 ## 4) 체크포인트 및 샘플 데이터 다운로드
 ### SimLingo 체크포인트(HuggingFace)
 ```bash
-git lfs clone https://huggingface.co/RenzKa/simlingo checkpoints/simlingo/simlingo/checkpoints/
+mkdir -p checkpoints/ && cd checkpoints/
+git lfs clone https://huggingface.co/RenzKa/simlingo
 ```
 
 ### 샘플 데이터셋(Google Drive)
