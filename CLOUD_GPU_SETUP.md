@@ -79,7 +79,7 @@ ssh remote_gpu
 git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD_Team && chmod +x tools/cloud_bootstrap.sh && bash tools/cloud_bootstrap.sh
 ```
 스크립트가 libgl1/ffmpeg/git-lfs 설치, git lfs pull, requirements 설치, 지정된 공개키(ssh-ed25519 …hyun) 등록까지 수행하고,
-Git credential helper(store) 설정으로 토큰 캐싱까지 완료합니다. 남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
+`git config --global credential.helper store` 설정으로 토큰 캐싱까지 완료합니다. 남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
 
 ## 3) 필수 시스템 패키지(우분투)
 ```bash
@@ -98,7 +98,28 @@ npm install -g @openai/codex
 # 확인: node -v && npm -v && codex --help
 ```
 
-## 4) 데이터 배치
+## Git 토큰 캐싱이 안 될 때 수동 설정
+```bash
+git config --global credential.helper store
+git config --global user.name "<your name>"
+git config --global user.email "<your email>"
+# 이후 최초 git/pull/push 시 한 번 토큰/패스워드를 입력하면 ~/.git-credentials에 저장됩니다.
+```
+
+## 4) 체크포인트 및 샘플 데이터 다운로드
+### SimLingo 체크포인트(HuggingFace)
+```bash
+git lfs clone https://huggingface.co/RenzKa/simlingo checkpoints/simlingo/simlingo/checkpoints/
+```
+
+### 샘플 데이터셋(Google Drive)
+```bash
+python3 -m pip install --upgrade gdown
+gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
+mkdir -p data && unzip -o sample_dataset.zip -d data
+```
+
+## 5) 데이터 배치
 - 전처리된 구조 예:
 ```
 data/<dataset>/<scenario>/
@@ -109,7 +130,7 @@ data/<dataset>/<scenario>/
 - 기본 scene_dir: `data/DREYEVE_DATA_preprocessed/01`
 - 서브디렉토리명이 다르면 `--frames_subdir/--speed_subdir`로 지정.
 
-## 5) Sim-Lingo 추론 실행
+## 6) Sim-Lingo 추론 실행
 ```bash
 python experiment/simlingo_inference_baseline.py \
   --scene_dir data/DREYEVE_DATA_preprocessed/01 \
