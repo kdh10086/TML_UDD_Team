@@ -197,6 +197,6 @@ cd /mnt/data1/
 #샘플 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
 #DREYEVE_DATA_filtered 데이터셋
-gdown (추가 예정) -O DREYEVE_DATA_filtered.zip
+gdown --fuzzy 'https://drive.google.com/file/d/1-VgGkHAf5WNOCEISZXjNazaaEn3vE9r0/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
 ```
 
