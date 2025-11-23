@@ -155,14 +155,14 @@ data/<dataset>/<scenario>/
 ```bash
 # Raw attention
 python -m experiment.vit_raw_attention \
-  --scene_dir data/sample_scene \
+  --scene_dir data/sample/01 \
   --output_dir experiment_outputs/vit_raw \
-  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207
+  --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_01_action_curv_energy_251123_2207 \
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_01_action_curv_energy_251123_2207
 
 # Attention rollout
 python -m experiment.vit_attention_rollout \
-  --scene_dir data/sample_scene \
+  --scene_dir data/sample/01 \
   --output_dir experiment_outputs/vit_rollout \
   --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
@@ -170,7 +170,7 @@ python -m experiment.vit_attention_rollout \
 
 # Attention flow
 python -m experiment.vit_attention_flow \
-  --scene_dir data/sample_scene \
+  --scene_dir data/sample/01 \
   --output_dir experiment_outputs/vit_flow \
   --trajectory_overlay_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
