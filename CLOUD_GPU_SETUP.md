@@ -133,8 +133,8 @@ data/<dataset>/<scenario>/
 
 ## 6) Sim-Lingo 추론 실행
 ```bash
-python experiment/simlingo_inference_baseline.py \
-  --scene_dir data/DREYEVE_DATA_preprocessed/01 \
+PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
+  --scene_dir data/sample/01 \
   --output_dir experiment_outputs/simlingo_inference \
   --target_mode auto \
   --explain_mode action \
