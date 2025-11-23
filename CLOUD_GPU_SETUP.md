@@ -2,19 +2,84 @@
 
 이 레포를 윈도우 기반 우분투 VDI/클라우드 GPU 환경에서 바로 돌리기 위한 빠른 부트업 안내입니다.
 
+# 원격 GPU 노드 접속 매뉴얼
+### 📢 [UDD 팀] GPU 서버 접속 가이드
+
+우리 프로젝트 GPU 서버(Theta EdgeCloud) 접속 설정 방법입니다.
+보안을 위해 각자의 로컬에서 키를 만들고 등록하는 방식으로 진행합니다.
+
+#### 1단계: 본인의 SSH 키 생성
+터미널(Mac/Ubuntu/WSL)을 열고 아래 명령어를 입력하세요.
+**중요:** `-C` 뒤에 본인의 **영어 이니셜 혹은 닉네임(예: kdh, yjh)**을 적어주세요.
+
+```bash
+# 1. 키 생성
+ssh-keygen -t ed25519 -C "본인이니셜 혹은 닉네임" -f ~/.ssh/theta_udd
+```
+
+> **⚠️ 필독 (비밀번호 설정 시 주의사항)**
+> 키 생성 도중 `Enter passphrase`라고 물어볼 때:
+> * **비밀번호 없이** 쓰려면: 그냥 엔터(Enter)를 두 번 치세요. (편리함/권장)
+> * **비밀번호를 설정**하려면: 입력한 암호를 **반드시 메모장이나 텍스트 파일 등에 따로 적어두세요.**
+> * (※ 접속할 때마다 이 암호를 묻습니다. 잊어버리면 **절대 복구 불가**하며 키를 다시 만들어야 합니다.)
+
+#### 2단계: 접속 정보 미리 설정 (Config)
+매번 IP와 포트를 입력하지 않도록 설정 파일을 미리 만들어둡니다.
+
+1. 터미널에서 설정 파일 열기:
+   `nano ~/.ssh/config`
+
+2. 아래 내용을 맨 아래에 빈 줄을 만들고 그대로 붙여넣기:
+
+```text
+Host remote_gpu
+    HostName 35.199.51.171
+    User root
+    Port 30096
+    IdentityFile ~/.ssh/theta_udd
+    IdentitiesOnly yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+```
+
+3. 저장하고 나오기 (`Ctrl + O` 엔터 -> `Ctrl + X`)
+
+#### 3단계: 공개키 전송 및 등록 대기
+이제 만들어진 열쇠(공개키)를 김도형에게 보내주세요.
+
+1. 아래 명령어로 공개키 내용 출력:
+```bash
+cat ~/.ssh/theta_udd.pub
+```
+
+2. **출력된 긴 문자열(`ssh-ed25519 ...`) 전체를 복사해서 김도형에게 보내주세요.**
+3. **"서버 등록 완료"** 연락을 받을 때까지 잠시 대기합니다.
+
+#### 4단계: 접속 테스트
+등록이 완료되었다면, 터미널에서 아래 명령어만 치면 바로 접속됩니다.
+
+```bash
+ssh remote_gpu
+```
+
+※ 혹시 `WARNING: UNPROTECTED PRIVATE KEY FILE!` 에러가 뜨면 아래 명령어를 입력하고 다시 접속하세요.
+`chmod 600 ~/.ssh/theta_udd`
+
+
+
+# 원격 GPU 노드 접속 이후
 ## 1) 필수 전제
 - NVIDIA 드라이버: CUDA 12.1 호환 드라이버(GPU 필수).
 - 디스크 여유: 모델 체크포인트 및 HF 모델 다운로드 공간(수 GB 이상).
 - 인터넷 접근: 처음 실행 시 HuggingFace 모델(InternVL2 등) 자동 다운로드 필요.
 
-## 2) 리포지토리 클론 + 체크포인트
+## 2) 원클릭 부트스트랩 (클론+의존성 설치 한 번에)
+이미 SSH 접속한 상태에서 아래 한 줄로 클론 → LFS → 의존성 설치까지 실행:
 ```bash
-git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD_Team
-git lfs install
-git lfs pull  # checkpoints/simlingo/.../pytorch_model.pt 등 대형 파일 받기
-# 또는 HuggingFace에서 모델 직접 클론 후 이 레포의 checkpoints/ 아래에 배치:
-# git lfs clone https://huggingface.co/RenzKa/simlingo checkpoints/simlingo/simlingo/checkpoints/
+git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD_Team && bash tools/cloud_bootstrap.sh
 ```
+스크립트가 libgl1/ffmpeg/git-lfs 설치, git lfs pull, requirements 설치를 수행하고,
+남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
 
 ## 3) 필수 시스템 패키지(우분투)
 ```bash
@@ -42,12 +107,7 @@ npm -v
 codex --help
 ```
 
-## 4) 파이썬 의존성
-```bash
-pip install -r requirements.txt  # CUDA 12.1 빌드(torch 2.3.1+cu121 등) 포함
-```
-
-## 5) 데이터 배치
+## 4) 데이터 배치
 - 전처리된 구조 예:
 ```
 data/<dataset>/<scenario>/
@@ -58,7 +118,7 @@ data/<dataset>/<scenario>/
 - 기본 scene_dir: `data/DREYEVE_DATA_preprocessed/01`
 - 서브디렉토리명이 다르면 `--frames_subdir/--speed_subdir`로 지정.
 
-## 6) Sim-Lingo 추론 실행
+## 5) Sim-Lingo 추론 실행
 ```bash
 python experiment/simlingo_inference_baseline.py \
   --scene_dir data/DREYEVE_DATA_preprocessed/01 \
@@ -66,12 +126,6 @@ python experiment/simlingo_inference_baseline.py \
 ```
 - tqdm로 시나리오 단위 진행률 표시.
 - 입력 속도는 `video_garmin_speed`의 m/s를 자동 주입. 없으면 0 m/s 폴백.
-
-## 7) 뷰어 (선택)
-```bash
-python tools/overlay_viewer.py
-# data/<name> 또는 전체/시나리오 경로 입력 → a/d/좌/우로 탐색, q/Esc 종료
-```
 
 ## 8) 기타
 - FlashAttention2 미설치 시 경고만 출력, 동작에는 문제 없음.
