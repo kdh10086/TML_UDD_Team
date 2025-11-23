@@ -141,7 +141,7 @@ PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
   --text_token_strategy max \
   --text_token_index -1 \
   --kinematic_metric curv_energy \
-  --image_size 224 \
+  --image_size 448 \
   --max_patches 2
 ```
 - tqdm로 시나리오 단위 진행률 표시.
