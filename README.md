@@ -14,6 +14,7 @@ python experiment/simlingo_inference_baseline.py \
   [--checkpoint checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt] \
   [--scene_dir data/scene01] \
   [--output_dir experiment_outputs/simlingo_inference] \
+  [--use_spline --spline_smoothing 0.1 --spline_num_samples 0] \
   [--explain_mode action|text] \
   [--kinematic_metric curv_energy|...] \
   [--text_token_strategy max|last|index] \
@@ -23,6 +24,7 @@ python experiment/simlingo_inference_baseline.py \
 - `--config`, `--checkpoint`는 기본값이 체크포인트에 포함된 `.hydra/config.yaml`과 `epoch=013.ckpt/pytorch_model.pt`로 세팅되어 있어 추가 인자 없이 실행할 수 있습니다.
 - `--scene_dir`는 `scene01`처럼 이미지가 들어 있는 디렉토리를 가리킵니다.
 - `--output_dir`는 결과 루트 디렉토리입니다. 실행 시점에 `scene명_모드_YYMMDD_HHMM` 형식의 하위 폴더가 자동 생성되어 그 안에 `.pt`가 저장됩니다.
+- `--use_spline`을 켜면 path/speed waypoint를 파라메트릭 cubic smoothing spline으로 매끄럽게 한 뒤(2차 차분 페널티), 동일/지정된 샘플 수로 리샘플해 운동학 함수를 계산합니다. `--spline_smoothing`(기본 0)과 `--spline_num_samples`(0이면 원본 개수 유지)로 세부 설정이 가능합니다.
 
 ### 런타임 동작 과정 (요약)
 
