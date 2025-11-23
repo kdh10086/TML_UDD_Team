@@ -12,8 +12,13 @@ echo "[*] Repository root: $REPO_ROOT"
 
 if command -v apt-get >/dev/null 2>&1; then
   echo "[*] Installing system packages (libgl1 ffmpeg git-lfs)..."
-  sudo apt-get update -y
-  sudo apt-get install -y libgl1 ffmpeg git-lfs
+  if command -v sudo >/dev/null 2>&1; then
+    sudo apt-get update -y
+    sudo apt-get install -y libgl1 ffmpeg git-lfs
+  else
+    apt-get update -y
+    apt-get install -y libgl1 ffmpeg git-lfs
+  fi
 else
   echo "[!] apt-get not found; please install libgl1, ffmpeg, git-lfs manually."
 fi
