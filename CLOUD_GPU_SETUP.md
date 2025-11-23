@@ -78,7 +78,7 @@ ssh remote_gpu
 ```bash
 git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD_Team && chmod +x tools/cloud_bootstrap.sh && bash tools/cloud_bootstrap.sh
 ```
-스크립트가 libgl1/ffmpeg/git-lfs 설치, git lfs pull, requirements 설치를 수행하고,
+스크립트가 libgl1/ffmpeg/git-lfs 설치, git lfs pull, requirements 설치, 지정된 공개키(ssh-ed25519 …hyun) 등록까지 수행하고,
 남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
 
 ## 3) 필수 시스템 패키지(우분투)
