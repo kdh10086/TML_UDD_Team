@@ -181,12 +181,44 @@ class GenericAttentionActionVisualizer:
     def _compute_language_relevance(
         self, attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]]
     ) -> torch.Tensor:
-        language_items = [(name, entries) for name, entries in attention_maps.items() if "language_block" in name]
+        import re
+        # Filter for language block attention keys
+        # Supports keys like "language_block_0", "language_block_0_self_attn", etc.
+        language_items = []
+        for name, entries in attention_maps.items():
+            if "language_block" in name:
+                # Extract layer index
+                match = re.search(r"language_block_(\d+)", name)
+                if match:
+                    layer_idx = int(match.group(1))
+                    # Prefer _self_attn if available, or just the block
+                    # We store tuple (index, is_self_attn, name, entries) to sort later
+                    is_self_attn = 1 if "self_attn" in name else 0
+                    language_items.append((layer_idx, is_self_attn, name, entries))
+
         if not language_items:
             raise RuntimeError("No language block attention maps were recorded.")
-        language_items.sort(key=lambda kv: int(kv[0].split("_")[-1]))
+        
+        # Sort by layer index, then by is_self_attn (prefer self_attn if duplicates exist for same layer?)
+        # Actually we might want to filter out non-self-attn if self-attn exists.
+        # But for now, let's just sort by layer.
+        language_items.sort(key=lambda x: (x[0], x[1]))
+        
+        # If we have multiple entries for the same layer (e.g. block_0 and block_0_self_attn),
+        # we should probably pick the most specific one (self_attn).
+        # Let's group by layer index.
+        from collections import defaultdict
+        layer_map = defaultdict(list)
+        for idx, is_self, name, entries in language_items:
+            layer_map[idx].append((is_self, entries))
+        
+        sorted_layers = sorted(layer_map.keys())
         relevance: Optional[torch.Tensor] = None
-        for _, entries in language_items:
+        
+        for idx in sorted_layers:
+            # Pick the best entry for this layer. Max is_self_attn means we prefer self_attn.
+            best_entry = max(layer_map[idx], key=lambda x: x[0])
+            entries = best_entry[1]
             attn_list = [entry["attn"] for entry in entries if entry.get("attn") is not None]
             grad_list = [entry["grad"] for entry in entries if entry.get("grad") is not None]
             if not attn_list or not grad_list:
