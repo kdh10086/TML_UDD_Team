@@ -450,6 +450,10 @@ class SimLingoVisualizer:
                     elif hasattr(layer.self_attn, "dropout"): target = layer.self_attn.dropout
                     elif hasattr(layer.self_attn, "attention_dropout"): target = layer.self_attn.attention_dropout
                 
+                # Check if target is a module (it might be a float config value)
+                if target is not None and not isinstance(target, torch.nn.Module):
+                    target = None
+
                 if target is None:
                     # Fallback to layer and print structure to debug LLM
                     target = layer
