@@ -692,13 +692,15 @@ class SimLingoInferenceBaseline:
             self.recorder.register_module(lm, "language_model_top", record_grad=True)
             
             layers = []
-            if hasattr(lm, "layers"):
-                layers = lm.layers
-            elif hasattr(lm, "model") and hasattr(lm.model, "layers"):
+            # Try to find layers in various structures
+            if hasattr(lm, "model") and hasattr(lm.model, "layers"):
                 layers = lm.model.layers
-            elif hasattr(lm, "h"): # Common in some models
-                layers = lm.h
-            elif hasattr(lm, "block"): # Common in others
+            elif hasattr(lm, "layers"):
+                layers = lm.layers
+            elif hasattr(lm, "language_model") and hasattr(lm.language_model, "model") and hasattr(lm.language_model.model, "layers"):
+                # InternVLChatModel structure: self.language_model -> Qwen2ForCausalLM -> model -> layers
+                layers = lm.language_model.model.layers
+            elif hasattr(lm, "block"): # For some older models
                 layers = lm.block
             
             # print(f"[DEBUG] Found {len(layers)} LLM layers for hooking")
