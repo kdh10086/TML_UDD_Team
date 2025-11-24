@@ -35,15 +35,35 @@ if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
     sys.path.insert(0, str(SIMLINGO_SRC))
 
 from simlingo_training.models.driving import DrivingModel
+from simlingo_training.models.encoder import internvl2_model as ivl
 from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
 from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
 from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics, project_points
-from experiment.vision_attn_patch import patch_vision_attention
-
-patch_vision_attention()
 from experiment.simlingo_patches import patch_simlingo
 
 patch_simlingo()
+
+# Ensure InternVL vision encoder forwards with output_attentions=True so vision hooks can capture attn
+_orig_extract_feature = getattr(ivl.LingoInternVLModel, "extract_feature", None)
+
+
+def _patched_extract_feature(self, pixel_values, **kwargs):
+    outputs = self.model(
+        pixel_values,
+        output_attentions=True,
+        return_dict=True,
+    )
+    # keep return shape identical to original (hidden states only)
+    if hasattr(outputs, "last_hidden_state"):
+        return outputs.last_hidden_state
+    # fallback to original behavior if unexpected return
+    if _orig_extract_feature is not None:
+        return _orig_extract_feature(self, pixel_values, **kwargs)
+    return outputs
+
+
+if _orig_extract_feature is not None:
+    ivl.LingoInternVLModel.extract_feature = _patched_extract_feature
 
 DEFAULT_CONFIG_PATH = Path("checkpoints/simlingo/simlingo/.hydra/config.yaml")  # 기본 Hydra config
 DEFAULT_CHECKPOINT_PATH = Path("checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt")  # 기본 ckpt
