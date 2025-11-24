@@ -100,10 +100,10 @@ class InternVLChatModel(PreTrainedModel):
             else:
                 raise NotImplementedError(f'{config.llm_config.architectures[0]} is not implemented.')
         # install attention capture hooks on language_model (Qwen2/LLaMA) to expose attn+grad per layer/head
-        try:
-            install_qwen2_attention_hooks(self.language_model)
-        except Exception as exc:  # pragma: no cover
-            warnings.warn(f"Failed to install attention hooks on language_model: {exc}", RuntimeWarning)
+        # try:
+        #     install_qwen2_attention_hooks(self.language_model)
+        # except Exception as exc:  # pragma: no cover
+        #     warnings.warn(f"Failed to install attention hooks on language_model: {exc}", RuntimeWarning)
 
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.llm_config.hidden_size
@@ -171,21 +171,15 @@ class InternVLChatModel(PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        # 강제로 전 레이어 어텐션을 노출하고 grad를 유지
-        attn_list = []
-        lm = getattr(self.language_model, "model", None) or self.language_model
-        if hasattr(lm, "layers"):
-            for layer in lm.layers:
-                attn = getattr(layer.self_attn, "attn_map", None)
-                if attn is None:
-                    continue
-                try:
-                    attn.retain_grad()
-                except Exception:
-                    pass
-                attn_list.append(attn)
-        if attn_list:
-            outputs.attentions = tuple(attn_list)
+        # Use the attentions returned by the model directly
+        if outputs.attentions is not None:
+            for attn in outputs.attentions:
+                if attn is not None and torch.is_tensor(attn):
+                    try:
+                        attn.retain_grad()
+                    except Exception:
+                        pass
+        
         logits = outputs.logits
 
         loss = None
