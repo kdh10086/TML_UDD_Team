@@ -334,34 +334,30 @@ class SimLingoVisualizer:
                 # Debug: Inspect output structure for the first layer
                 if "layer_0" in name and "vision" in name:
                     # Print Module Structure to find inner attention
-                    print(f"DEBUG: Hook {name} Module Type: {type(module)}")
-                    # Only print structure once
-                    if not hasattr(self, "_printed_structure"):
-                        print(f"DEBUG: Module Structure:\n{str(module)}")
-                        self._printed_structure = True
+                    # print(f"DEBUG: Hook {name} Module Type: {type(module)}")
+                    pass
                         
-                    print(f"DEBUG: Hook {name} Output Type: {type(output)}")
-                    if isinstance(output, tuple):
-                        print(f"DEBUG: Hook {name} Output Length: {len(output)}")
-                        for idx, item in enumerate(output):
-                            if hasattr(item, "shape"):
-                                print(f"  - Item {idx} Shape: {item.shape}")
-                            else:
-                                print(f"  - Item {idx} Type: {type(item)}")
+                    # print(f"DEBUG: Hook {name} Output Type: {type(output)}")
                 
                 # Try to extract attn
+                attn = None
+                context = None
+                
                 if isinstance(output, tuple):
                     context = output[0]
                     if len(output) > 1:
                         attn = output[1] # [B, H, S, S]
+                elif isinstance(output, torch.Tensor):
+                    # If hooking attn_drop, output IS the attention map
+                    # Check dimensions to be safe: [B, H, S, S] -> dim=4
+                    if output.dim() == 4:
+                        attn = output
+                        context = output # For debug consistency
                     else:
-                        attn = None
-                else:
-                    context = output
-                    attn = None
+                        context = output
                 
                 # Debug: Check context gradients (Layer Output)
-                if save_grad and hasattr(context, "requires_grad") and context.requires_grad:
+                if save_grad and hasattr(context, "requires_grad") and context is not None and context.requires_grad:
                     def context_grad_hook(grad):
                         if "layer_0" in name and "vision" in name:
                             print(f"DEBUG: Hook {name} Context (Output) Grad Mean: {grad.float().mean():.6e}")
@@ -369,7 +365,7 @@ class SimLingoVisualizer:
 
                 if attn is None: 
                     if "layer_0" in name and "vision" in name:
-                        print(f"DEBUG: Hook {name} - Attn is None!")
+                        print(f"DEBUG: Hook {name} - Attn is None! Output shape: {output.shape if hasattr(output, 'shape') else 'N/A'}")
                     return
 
                 # Debug: Check if attn is attached to graph
