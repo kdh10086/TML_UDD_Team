@@ -315,14 +315,23 @@ class SimLingoVisualizer:
                 
                 if attn is None: return
 
+                # Debug: Check if attn is attached to graph
+                # Only print for the first layer to avoid spam
+                if "layer_0" in name and "vision" in name:
+                     print(f"Hook {name} captured attn. Shape: {attn.shape}, Requires Grad: {attn.requires_grad}")
+
                 self.attn_maps[name] = attn.detach()
                 
                 if save_grad:
                     # Hook for backward pass to capture gradients
-                    def grad_hook(grad):
-                        self.grad_maps[name] = grad.detach()
-                    # Register the hook on the tensor we just captured
-                    attn.register_hook(grad_hook)
+                    if attn.requires_grad:
+                        def grad_hook(grad):
+                            self.grad_maps[name] = grad.detach()
+                        # Register the hook on the tensor we just captured
+                        attn.register_hook(grad_hook)
+                    else:
+                        if "layer_0" in name and "vision" in name:
+                            print(f"WARNING: Hook {name} cannot register grad hook because attn.requires_grad is False")
             return hook
 
         # 1. Vision Encoder Hooks (for All methods)
