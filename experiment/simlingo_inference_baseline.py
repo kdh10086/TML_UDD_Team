@@ -30,6 +30,7 @@ from PIL import Image, ImageDraw
 from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoProcessor
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention
+import importlib.util
 
 # 어떤 위치에서 실행해도 external/simlingo 모듈을 불러올 수 있도록 경로 추가
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,28 @@ if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
 LOCAL_HF_MODULES = REPO_ROOT / "experiment" / "InternVL2-1B"
 if LOCAL_HF_MODULES.exists():
     os.environ["HF_MODULES_CACHE"] = str(LOCAL_HF_MODULES.resolve())
+
+# Force-import patched InternVL2 modules so AutoModel uses them instead of downloading
+def _register_local_internvl_modules():
+    base = LOCAL_HF_MODULES / "0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187"
+    module_map = {
+        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_internvl_chat": base / "modeling_internvl_chat.py",
+        "transformers_modules.OpenGVLab.InternVL2-1B.configuration_intern_vit": base / "configuration_intern_vit.py",
+        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_intern_vit": base / "modeling_intern_vit.py",
+        "transformers_modules.OpenGVLab.InternVL2-1B.conversation": base / "conversation.py",
+    }
+    for mod_name, path in module_map.items():
+        if not path.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+
+
+if LOCAL_HF_MODULES.exists():
+    _register_local_internvl_modules()
 
 # Patch Qwen2Attention forward to stash attn weights for all layers/heads
 _orig_qwen2_attn_forward = Qwen2Attention.forward
