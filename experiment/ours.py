@@ -269,6 +269,37 @@ class GenericAttentionActionVisualizer:
             raw_output_dir,
         )
 
+    def _resolve_image_path(self, payload: Dict[str, Any], scene_dir: Optional[Path]) -> Path:
+        """Find the image file path for a given payload."""
+        raw_path = payload.get("image_path")
+        if raw_path:
+            p = Path(raw_path)
+            if p.exists():
+                return p
+        if scene_dir is not None:
+            scene_dir = Path(scene_dir)
+            tag = payload.get('tag', '')
+            candidates = [
+                scene_dir / "input_images" / f"{tag}.png",
+                scene_dir / "video_garmin" / f"{tag}.png",
+                scene_dir / "images" / f"{tag}.png",
+                scene_dir / f"{tag}.png",
+            ]
+            for c in candidates:
+                if c.exists():
+                    return c
+        if self.payload_root:
+            for base in [self.payload_root, self.payload_root.parent]:
+                if base is None:
+                    continue
+                tag = payload.get('tag', '')
+                for subdir in ["input_images", "video_garmin", "images", ""]:
+                    candidate = (base / subdir / f"{tag}.png") if subdir else (base / f"{tag}.png")
+                    if candidate.exists():
+                        return candidate
+        raise FileNotFoundError(f"Could not find image for payload tag={payload.get('tag')}")
+
+
     def _process_cached_payload(
         self,
         payload: Dict[str, Any],
