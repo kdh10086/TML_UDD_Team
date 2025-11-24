@@ -88,7 +88,7 @@ def _patched_greedy_sample_llm(
         token_scores = torch.stack(token_score_seq, dim=1)
         tokens_trimmed = sampled_tokens[:, :gen_len]
         self.last_sampled_tokens = tokens_trimmed.detach()
-        self.last_sampled_token_scores = token_scores.detach()
+        self.last_sampled_token_scores = token_scores  # keep grad for relevance
     else:
         self.last_sampled_tokens = None
         self.last_sampled_token_scores = None
@@ -161,7 +161,7 @@ def _patched_greedy_sample_llama(
         token_scores = torch.stack(token_score_seq, dim=1)
         tokens_trimmed = sampled_tokens[:, :gen_len]
         self.last_sampled_tokens = tokens_trimmed.detach()
-        self.last_sampled_token_scores = token_scores.detach()
+        self.last_sampled_token_scores = token_scores  # keep grad for relevance
     else:
         self.last_sampled_tokens = None
         self.last_sampled_token_scores = None
