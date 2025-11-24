@@ -855,14 +855,21 @@ class SimLingoVisualizer:
                             best_w = h
                             best_h = w
                 h_grid, w_grid = best_h, best_w
+            
+            print(f"DEBUG: Chunk n={n}, is_global={is_global} -> Grid ({h_grid}, {w_grid})")
 
             try:
                 map_2d = chunk.view(h_grid, w_grid).cpu().numpy()
                 map_resized = cv2.resize(map_2d, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
                 return map_resized
             except Exception as e:
-                print(f"WARNING: Reshape failed: {e}")
-                return np.zeros((orig_h, orig_w), dtype=np.float32)
+                print(f"WARNING: Reshape failed for n={n} to ({h_grid}, {w_grid}). Error: {e}")
+                # Fallback to 1D
+                try:
+                    map_2d = chunk.view(1, n).cpu().numpy()
+                    return cv2.resize(map_2d, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+                except:
+                    return np.zeros((orig_h, orig_w), dtype=np.float32)
 
         # Split into Tiles and Global if applicable
         if n_tokens > chunk_size:
