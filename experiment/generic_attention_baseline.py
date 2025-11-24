@@ -197,10 +197,13 @@ class GenericAttentionTextVisualizer:
         
         # Validate payload
         if cached_payload.get("mode") != "text":
+             print(f"[DEBUG] Skipping {pt_path.name}: mode is '{cached_payload.get('mode')}', expected 'text'")
              return None
         if not cached_payload.get("attention"):
+             print(f"[DEBUG] Skipping {pt_path.name}: 'attention' key missing or empty")
              return None
         if cached_payload.get("text_outputs") is None:
+             print(f"[DEBUG] Skipping {pt_path.name}: 'text_outputs' key missing")
              return None
 
         return self._process_cached_payload(

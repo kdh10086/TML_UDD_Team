@@ -63,7 +63,10 @@ class GenericAttentionActionVisualizer:
         payload_root: Optional[Path] = None,
     ) -> None:
         if payload_root is None:
-            raise ValueError("payload_root (.pt 디렉터리) 없이는 실행할 수 없습니다.")
+            # Will attempt to derive from scene_dir later or raise error if scene_dir is also None
+            pass
+        else:
+            self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
         self.config_path = Path(config_path)
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         cmap_name = colormap.upper()
@@ -80,10 +83,13 @@ class GenericAttentionActionVisualizer:
         self.tokenizer.padding_side = "left"
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
         self.trajectory_overlay_root = trajectory_overlay_root
-        self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
-        self._payload_index = self._index_payloads(self.payload_root)
+        
+        # payload_root resolution moved to generate_scene_heatmaps or handled lazily
+        self.explicit_payload_root = payload_root
+        self._payload_index = {} # Will be populated in generate_scene_heatmaps
 
     def generate_scene_heatmaps(self, scene_dir: Path, output_dir: Path, suffix: str = "generic_action") -> None:
+        """scene_dir 내 pt 파일들에 대해 히트맵을 생성하고 저장한다."""
         scene_dir = Path(scene_dir)
         output_dir = Path(output_dir)
         if not scene_dir.exists():
@@ -91,35 +97,91 @@ class GenericAttentionActionVisualizer:
         output_dir.mkdir(parents=True, exist_ok=True)
         scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
         
+        # Resolve payload root
+        if self.explicit_payload_root:
+            self.payload_root = self._resolve_payload_root(self.explicit_payload_root, self.trajectory_overlay_root)
+        else:
+            # Default to scene_dir/pt
+            potential_pt = scene_dir / "pt"
+            if potential_pt.exists():
+                self.payload_root = potential_pt
+            else:
+                # Fallback to scene_dir itself
+                self.payload_root = scene_dir
+        
+        if not self.payload_root or not self.payload_root.exists():
+             raise FileNotFoundError(f"Could not locate payload directory in {scene_dir} or specified root.")
+
+        print(f"Loading payloads from: {self.payload_root}")
+        self._payload_index = self._index_payloads(self.payload_root)
+        
+        if not self._payload_index:
+            print(f"No .pt files found in {self.payload_root}")
+            return
+
         # Robust image directory search
         candidates = [scene_dir / "input_images", scene_dir / "video_garmin", scene_dir / "images", scene_dir]
         image_root = scene_dir
+        print(f"[DEBUG] Searching for images in candidates: {candidates}")
         for cand in candidates:
+            print(f"[DEBUG] Checking candidate: {cand}")
             if cand.exists() and cand.is_dir():
                 # Check if it has images
-                if any(p.suffix.lower() in {".png", ".jpg", ".jpeg"} for p in cand.iterdir()):
+                has_images = False
+                for p in cand.iterdir():
+                    if p.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                        has_images = True
+                        break
+                print(f"[DEBUG] Candidate {cand} exists. Has images? {has_images}")
+                if has_images:
                     image_root = cand
                     break
+            else:
+                print(f"[DEBUG] Candidate {cand} does not exist or is not a directory.")
         
-        image_paths = sorted(
-            [p for p in image_root.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
-        )
+        print(f"Using image root: {image_root}")
         route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
-        for image_path in image_paths:
-            self._process_single_image(image_path, scenario_output_dir, suffix, route_dir, speed_dir)
+
+        # Iterate over payloads
+        for tag, pt_path in sorted(self._payload_index.items()):
+            # Find corresponding image
+            image_path = None
+            for ext in [".png", ".jpg", ".jpeg"]:
+                cand = image_root / f"{tag}{ext}"
+                if cand.exists():
+                    image_path = cand
+                    break
+            
+            if image_path is None:
+                print(f"Warning: Image not found for tag {tag} in {image_root}. Skipping.")
+                continue
+
+            self._process_single_image(image_path, pt_path, scenario_output_dir, suffix, route_dir, speed_dir)
 
     def _process_single_image(
         self,
         image_path: Path,
+        pt_path: Path,
         output_dir: Path,
         suffix: str,
         route_overlay_dir: Optional[Path],
         speed_overlay_dir: Optional[Path],
     ) -> Path:
         record_tag = image_path.stem
-        cached_payload = self._load_cached_payload(record_tag)
-        if cached_payload is None:
-            raise RuntimeError("Cached payload(.pt) not found; this runner requires precomputed attention.")
+        # Load directly from pt_path
+        cached_payload = torch.load(pt_path, map_location="cpu")
+        
+        # Validate payload
+        if cached_payload.get("mode") != "action":
+             print(f"[DEBUG] Skipping {pt_path.name}: mode is '{cached_payload.get('mode')}', expected 'action'")
+             return None
+        if not cached_payload.get("attention"):
+             print(f"[DEBUG] Skipping {pt_path.name}: 'attention' key missing or empty")
+             return None
+        if cached_payload.get("target_info", {}).get("type") != "action":
+             print(f"[DEBUG] Skipping {pt_path.name}: target_info type is '{cached_payload.get('target_info', {}).get('type')}', expected 'action'")
+             return None
+
         return self._process_cached_payload(
             cached_payload, image_path, output_dir, suffix, route_overlay_dir, speed_overlay_dir
         )
@@ -148,6 +210,14 @@ class GenericAttentionActionVisualizer:
         image_token_positions = self._select_image_token_positions(prompt_token_ids, meta["num_total_image_tokens"])
         token_scores = relevance[source_index, image_token_positions]
         heatmap = self._scores_to_heatmap(torch.tensor(token_scores, device=self.device), meta)
+        
+        # Save Raw Heatmap (Grayscale)
+        heatmap_np = heatmap.detach().cpu().numpy()
+        heatmap_uint8 = np.uint8(255 * heatmap_np)
+        raw_output_path = output_dir / f"{image_path.stem}_raw.png"
+        Image.fromarray(heatmap_uint8).save(raw_output_path)
+
+        # Save Overlay
         overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)
         output_path = output_dir / f"{image_path.stem}_{suffix}.png"
         Image.fromarray(overlay).save(output_path)
@@ -438,7 +508,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--payload_root",
         type=Path,
         default=None,
-        help="Directory containing cached .pt payloads (optional).",
+        help="Directory containing cached .pt payloads (optional, defaults to scene_dir/pt).",
     )
     return parser
 
