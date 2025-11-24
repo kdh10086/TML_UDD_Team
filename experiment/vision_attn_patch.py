@@ -35,8 +35,19 @@ def patch_vision_attention() -> None:
         from simlingo_training.models.encoder import internvl2_model as ivl
     except Exception:
         return
-    if hasattr(ivl.LingoInternVLModel.model, "extract_feature"):
-        ivl.LingoInternVLModel.model.extract_feature = types.MethodType(
-            _patched_extract_feature, ivl.LingoInternVLModel.model
-        )
+    if hasattr(ivl.LingoInternVLModel, "model"):
+        # patch the instance attr by assigning to the class and letting __init__ set self.model
+        def _wrap_init(self, variant, *args, **kwargs):
+            super(ivl.LingoInternVLModel, self).__init__()
+            self.model = ivl.AutoModel.from_pretrained(variant, trust_remote_code=True)
+            # attach patched extract_feature
+            if hasattr(self.model, "extract_feature"):
+                self.model.extract_feature = types.MethodType(_patched_extract_feature, self.model)
+            try:
+                self.num_embeddings = self.model.language_model.model.embed_tokens.num_embeddings
+            except Exception:
+                self.num_embeddings = self.model.language_model.vocab_size
+            self.use_global_img = None
+            self.processor = None
 
+        ivl.LingoInternVLModel.__init__ = _wrap_init
