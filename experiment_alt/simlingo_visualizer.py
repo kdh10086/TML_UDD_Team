@@ -416,8 +416,24 @@ class SimLingoVisualizer:
         # 2. Language Model Hooks (For Ours/Generic if requested)
         if method in ["generic", "all", "ours"]:
             lm = self.model.language_model.model
-            layers = getattr(lm, "layers", getattr(getattr(lm, "model", None), "layers", []))
+            
+            # Robust Layer Discovery
+            layers = []
+            if hasattr(lm, "layers"):
+                layers = lm.layers
+            elif hasattr(lm, "model") and hasattr(lm.model, "layers"):
+                layers = lm.model.layers
+            elif hasattr(lm, "h"):
+                layers = lm.h
+            elif hasattr(lm, "block"):
+                layers = lm.block
+                
+            print(f"DEBUG: Found {len(layers)} LLM layers for hooking.")
+            
             for i, layer in enumerate(layers):
+                if i == 0:
+                    print(f"DEBUG: Hooking LLM layer {i}")
+                    
                 # Try to find attention dropout in LLM layer
                 # InternLM2: layer.attention.attn_drop? or layer.self_attn.dropout?
                 target = None
@@ -505,7 +521,7 @@ class SimLingoVisualizer:
             method_dir.mkdir(parents=True, exist_ok=True)
             
             if method == "generic":
-                heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps)
+                heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps, meta)
             elif method == "rollout":
                 heatmap = self._get_rollout_relevance(self.attn_maps)
             elif method == "flow":
@@ -734,36 +750,47 @@ class SimLingoVisualizer:
         self.attn_maps = {}
         self.grad_maps = {}
 
-    def _get_generic_relevance(self, attn_maps, grad_maps):
-        # Filter for Vision Layers only for the Image Heatmap
-        # (Even if we hooked LLM, the image heatmap comes from ViT layers)
-        vision_maps = {k: v for k, v in attn_maps.items() if "vision" in k}
+    def _get_generic_relevance(self, attn_maps, grad_maps, meta):
+        # Generic Attention on Language Model (as per baseline)
+        # Filter for Language Layers
+        lm_maps = {k: v for k, v in attn_maps.items() if "language" in k}
         
-        num_layers = len(vision_maps)
+        num_layers = len(lm_maps)
         if num_layers == 0: return torch.zeros(1)
         
-        # Sort by layer index
-        sorted_keys = sorted(vision_maps.keys(), key=lambda x: int(x.split("_")[-1]))
+        sorted_keys = sorted(lm_maps.keys(), key=lambda x: int(x.split("_")[-1]))
         
-        first_map = vision_maps[sorted_keys[0]]
+        first_map = lm_maps[sorted_keys[0]]
         B, H, S, S = first_map.shape
-        # Explicitly use float32 for R
+        
+        # Initialize Relevance with Identity
         R = torch.eye(S, device=self.device, dtype=torch.float32).unsqueeze(0).expand(B, S, S)
         
         for name in sorted_keys:
-            attn = vision_maps[name].float()
+            attn = lm_maps[name].float()
             grad = grad_maps.get(name, torch.zeros_like(attn)).float()
             
+            # Chefer Rule: E_h [ (A * G)^+ ]
             cam = attn * grad
-            cam = cam.clamp(min=0).mean(dim=1)
+            cam = cam.clamp(min=0).mean(dim=1) # [B, S, S]
+            
+            # R = R + CAM * R
             R = R + torch.bmm(cam, R)
             
-        # FIX: InternVL ignores CLS token. We must aggregate relevance w.r.t ALL patch tokens.
-        # R[-1] is the last batch item (Global View).
-        # R[-1, 1:, 1:] is the Patch-to-Patch relevance matrix.
-        # Summing over dim 0 (rows) gives total relevance of each patch to the entire output embedding set.
-        if S <= 1: return torch.zeros(1) # Ensure there are patches beyond CLS token
-        return R[-1, 1:, 1:].sum(dim=0)
+        # Extract Relevance of Image Tokens w.r.t Target
+        target_idx = S - 1 # Last token
+        
+        image_indices = meta.get("image_token_indices", [])
+        if not image_indices:
+            return torch.zeros(1)
+            
+        # Select Global View tokens (last num_patches)
+        num_patches = meta.get("num_patches", 256)
+        if len(image_indices) > num_patches:
+            image_indices = image_indices[-num_patches:]
+            
+        scores = R[0, target_idx, image_indices]
+        return scores
 
     def _get_ours_relevance(self, attn_maps, grad_maps, meta):
         # "Ours" = Generic Attention on Language Model Layers
