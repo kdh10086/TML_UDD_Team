@@ -802,25 +802,50 @@ class SimLingoVisualizer:
         if heatmap.numel() == 0: return None
         
         n_patches = heatmap.shape[0]
-        grid_size = int(np.sqrt(n_patches))
-        
-        # Ensure heatmap is detached and float before normalization
         heatmap = heatmap.float().detach()
-
-        # Handle mismatch (e.g. if patches != square)
-        if grid_size * grid_size != n_patches:
-            # If not a perfect square, try to reshape to a 1D array for resizing
-            # or handle cases where it's not easily reshaped to 2D.
-            # For now, if it's not square, we'll just treat it as a 1D array
-            # and let cv2.resize handle the interpolation.
-            heatmap_2d = heatmap.view(1, n_patches).cpu().numpy()
-        else:
-            heatmap_2d = heatmap.view(grid_size, grid_size).cpu().numpy()
-            
-        orig_h, orig_w = meta["original_height"], meta["original_width"]
         
+        orig_h, orig_w = meta.get("original_height", 224), meta.get("original_width", 224)
+        
+        # Determine grid dimensions (h_grid, w_grid)
+        # We want h_grid * w_grid = n_patches
+        # And h_grid / w_grid approx orig_h / orig_w
+        
+        target_ratio = orig_h / orig_w
+        best_w = 1
+        min_error = float('inf')
+        
+        # Find factor pair (h, w) that minimizes aspect ratio error
+        for w in range(1, int(np.sqrt(n_patches)) + 1):
+            if n_patches % w == 0:
+                # Pair (w, h)
+                h = n_patches // w
+                
+                # Check ratio for (h, w)
+                current_ratio = h / w
+                error = abs(current_ratio - target_ratio)
+                if error < min_error:
+                    min_error = error
+                    best_w = w
+                    best_h = h
+                    
+                # Check ratio for (w, h) - swapped
+                current_ratio_swapped = w / h
+                error_swapped = abs(current_ratio_swapped - target_ratio)
+                if error_swapped < min_error:
+                    min_error = error_swapped
+                    best_w = h
+                    best_h = w
+                    
+        h_grid, w_grid = best_h, best_w
+        
+        try:
+            heatmap_2d = heatmap.view(h_grid, w_grid).cpu().numpy()
+        except Exception as e:
+            print(f"WARNING: Failed to reshape heatmap of size {n_patches} to ({h_grid}, {w_grid}). Error: {e}")
+            # Fallback to 1D -> Resize (will look like lines but better than crash)
+            heatmap_2d = heatmap.view(1, n_patches).cpu().numpy()
+            
         # Robust Normalization
-        # If max == min, normalize returns 0. Avoid this.
         if heatmap_2d.max() == heatmap_2d.min():
             heatmap_norm = np.zeros_like(heatmap_2d, dtype=np.uint8)
         else:
