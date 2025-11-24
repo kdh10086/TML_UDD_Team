@@ -322,7 +322,7 @@ class GenericAttentionTextVisualizer:
 
         # Save Overlay
         overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)
-        output_path = output_dir / f"{image_path.stem}_{suffix}.png"
+        output_path = output_dir / f"{image_path.stem}.png"
         Image.fromarray(overlay).save(output_path)
         return output_path
 
