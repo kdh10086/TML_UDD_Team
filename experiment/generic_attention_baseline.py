@@ -160,6 +160,18 @@ class GenericAttentionTextVisualizer:
 
             self._process_single_image(image_path, pt_path, scenario_output_dir, suffix, route_dir, speed_dir)
 
+    @staticmethod
+    def _prepare_output_subdir(output_root: Path, scene_dir: Path, suffix: str) -> Path:
+        scenario_name = scene_dir.name
+        base = f"{scenario_name}_{suffix}"
+        candidate = output_root / base
+        counter = 1
+        while candidate.exists():
+            candidate = output_root / f"{base}_{counter}"
+            counter += 1
+        candidate.mkdir(parents=True, exist_ok=False)
+        return candidate
+
     def _process_single_image(
         self,
         image_path: Path,
