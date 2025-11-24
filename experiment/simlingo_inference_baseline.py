@@ -45,6 +45,21 @@ if LOCAL_HF_MODULES.exists():
 # Force-import patched InternVL2 modules so AutoModel uses them instead of downloading
 def _register_local_internvl_modules():
     base = LOCAL_HF_MODULES / "0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187"
+    if not base.exists():
+        return
+
+    # Ensure package hierarchy exists for relative imports
+    def _ensure_pkg(name: str, path: Path):
+        if name in sys.modules:
+            return
+        pkg = types.ModuleType(name)
+        pkg.__path__ = [str(path)]
+        sys.modules[name] = pkg
+
+    _ensure_pkg("transformers_modules", base.parent)
+    _ensure_pkg("transformers_modules.OpenGVLab", base.parent / "OpenGVLab")
+    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", base)
+
     module_map = {
         "transformers_modules.OpenGVLab.InternVL2-1B.modeling_internvl_chat": base / "modeling_internvl_chat.py",
         "transformers_modules.OpenGVLab.InternVL2-1B.configuration_intern_vit": base / "configuration_intern_vit.py",
@@ -54,7 +69,9 @@ def _register_local_internvl_modules():
     for mod_name, path in module_map.items():
         if not path.exists():
             continue
-        spec = importlib.util.spec_from_file_location(mod_name, path)
+        spec = importlib.util.spec_from_file_location(
+            mod_name, path, submodule_search_locations=[str(path.parent)]
+        )
         if spec and spec.loader:
             module = importlib.util.module_from_spec(spec)
             sys.modules[mod_name] = module
