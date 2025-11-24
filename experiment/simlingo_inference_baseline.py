@@ -347,23 +347,29 @@ class AttentionRecorder:
         self._current_tag: Optional[str] = None
 
     def register_module(self, module: torch.nn.Module, name: str, record_grad: bool = True) -> None:
-        def hook(_, __, output):
+        def hook(mod, __, output):
             if self._active_buffers is None:
                 return
-            attn = self._extract_attention(output)
+            grad_tensor = None
+            # 먼저 모듈에 이미 저장된 attn_map을 확인 (커스텀 패치에서 설정)
+            attn = getattr(mod, "attn_map", None)
+            grad_tensor = getattr(mod, "attn_map_grad", None) if hasattr(mod, "attn_map_grad") else None
+            if attn is None:
+                attn = self._extract_attention(output)
             if attn is None:
                 return
             if record_grad:
                 attn.retain_grad()
+                grad_tensor = attn.grad if attn.grad is not None else grad_tensor
                 if self.keep_last_only:
-                    self._active_buffers[name] = attn
+                    self._active_buffers[name] = (attn, grad_tensor)
                 else:
-                    self._active_buffers.setdefault(name, []).append(attn)
+                    self._active_buffers.setdefault(name, []).append((attn, grad_tensor))
             else:
                 if self.keep_last_only:
-                    self._active_buffers[name] = attn.detach()
+                    self._active_buffers[name] = (attn.detach(), grad_tensor)
                 else:
-                    self._active_buffers.setdefault(name, []).append(attn.detach())
+                    self._active_buffers.setdefault(name, []).append((attn.detach(), grad_tensor))
 
         handle = module.register_forward_hook(hook)
         self.handles.append(handle)
@@ -405,9 +411,15 @@ class AttentionRecorder:
         for name, tensors in self._active_buffers.items():
             tensor_list = [tensors] if self.keep_last_only else tensors
             aggregated[name] = []
-            for tensor in tensor_list:
+            for pair in tensor_list:
+                if isinstance(pair, tuple):
+                    tensor, grad_tensor = pair
+                else:
+                    tensor, grad_tensor = pair, None
                 attn_tensor = tensor.detach()
-                grad_tensor = tensor.grad.detach() if tensor.grad is not None else None
+                if grad_tensor is None and tensor.grad is not None:
+                    grad_tensor = tensor.grad
+                grad_tensor = grad_tensor.detach() if grad_tensor is not None else None
                 if self.store_on_cpu:
                     attn_tensor = attn_tensor.to("cpu")
                     if grad_tensor is not None:
@@ -528,8 +540,8 @@ class SimLingoInferenceBaseline:
             self.cfg.model.vision_model.variant, image_size_override=self.image_size
         )
         self.model = self._build_model()
-        # 모든 forward 스텝의 어텐션을 누적 저장 (메모리 사용 증가 가능)
-        self.recorder = AttentionRecorder(keep_last_only=False)
+        # 최종 forward의 어텐션/grad만 유지 (레이어/헤드별)
+        self.recorder = AttentionRecorder(keep_last_only=True)
         self._register_attention_hooks()
         self._speed_cache: Dict[str, Dict[str, float]] = {}
 
