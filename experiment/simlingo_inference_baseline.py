@@ -71,13 +71,15 @@ def _register_local_internvl_modules():
     _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B")
     _ensure_pkg(f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}", tfm_base)
 
-    module_map = {
-        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_internvl_chat": tfm_base / "modeling_internvl_chat.py",
-        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.configuration_intern_vit": tfm_base / "configuration_intern_vit.py",
-        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_intern_vit": tfm_base / "modeling_intern_vit.py",
-        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.conversation": tfm_base / "conversation.py",
-    }
-    for mod_name, path in module_map.items():
+    module_map = [
+        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.__init__", tfm_base / "__init__.py"),
+        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.configuration_intern_vit", tfm_base / "configuration_intern_vit.py"),
+        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.configuration_internvl_chat", tfm_base / "configuration_internvl_chat.py"),
+        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_intern_vit", tfm_base / "modeling_intern_vit.py"),
+        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.conversation", tfm_base / "conversation.py"),
+        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_internvl_chat", tfm_base / "modeling_internvl_chat.py"),
+    ]
+    for mod_name, path in module_map:
         if not path.exists():
             continue
         spec = importlib.util.spec_from_file_location(
