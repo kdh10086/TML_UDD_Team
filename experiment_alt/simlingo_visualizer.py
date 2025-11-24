@@ -393,9 +393,15 @@ class SimLingoVisualizer:
         # 1. Vision Encoder Hooks (for All methods)
         vision_model = self.model.vision_model.image_encoder.model.vision_model
         for i, layer in enumerate(vision_model.encoder.layers):
-            # Hook the Layer/Block itself, not the attention submodule.
-            # Standard HF layers return (hidden_states, attentions) if output_attentions=True.
-            target = layer
+            # Target the dropout layer after softmax (Standard way to get attention map in ViT)
+            # Structure: layer -> attn (InternAttention) -> attn_drop (Dropout)
+            if hasattr(layer, "attn") and hasattr(layer.attn, "attn_drop"):
+                target = layer.attn.attn_drop
+            elif hasattr(layer, "attention") and hasattr(layer.attention, "attn_drop"):
+                target = layer.attention.attn_drop
+            else:
+                print(f"WARNING: Vision layer {i} structure unknown, cannot find attn_drop. Hooking layer instead.")
+                target = layer
             
             # Generic needs grad, others don't (but we capture grad if we run generic)
             save_grad = (method in ["generic", "all", "ours"])
@@ -406,10 +412,126 @@ class SimLingoVisualizer:
             lm = self.model.language_model.model
             layers = getattr(lm, "layers", getattr(getattr(lm, "model", None), "layers", []))
             for i, layer in enumerate(layers):
-                # Hook the Layer/Block itself
-                target = layer
+                # Try to find attention dropout in LLM layer
+                # InternLM2: layer.attention.attn_drop? or layer.self_attn.dropout?
+                target = None
+                if hasattr(layer, "attention"):
+                    if hasattr(layer.attention, "attn_drop"): target = layer.attention.attn_drop
+                    elif hasattr(layer.attention, "dropout"): target = layer.attention.dropout
+                elif hasattr(layer, "self_attn"):
+                    if hasattr(layer.self_attn, "attn_drop"): target = layer.self_attn.attn_drop
+                    elif hasattr(layer.self_attn, "dropout"): target = layer.self_attn.dropout
+                    elif hasattr(layer.self_attn, "attention_dropout"): target = layer.self_attn.attention_dropout
+                
+                if target is None:
+                    # Fallback to layer and print structure to debug LLM
+                    target = layer
+                    if i == 0:
+                        print(f"DEBUG: LLM Layer 0 Structure (Cannot find dropout):\n{str(layer)}")
                 
                 self.hooks.append(target.register_forward_hook(get_hook(f"language_layer_{i}", save_grad=True)))
+
+    def _remove_hooks(self):
+        for h in self.hooks:
+            h.remove()
+        self.hooks = []
+
+    # --- Visualization Methods ---
+
+    def generate_visualization(
+        self, 
+        image_path: Path, 
+        output_dir: Path, 
+        methods: List[str] = ["generic", "rollout", "raw", "flow", "ours"],
+        metric: str = "curv_energy",
+        current_speed: float = 0.0,
+        explain_mode: str = "action" # "action" or "text"
+    ):
+        self.model.zero_grad()
+        driving_input, meta = self._prepare_driving_input(image_path, current_speed)
+        
+        # Register Hooks
+        run_generic_or_ours = "generic" in methods or "ours" in methods or "all" in methods
+        self._register_hooks(method="all" if run_generic_or_ours else "vision")
+
+        # Forward
+        outputs = self.model(driving_input)
+        pred_speed_wps, pred_route, _ = outputs
+        
+        # Debug: Check output gradients
+        print(f"Pred Route Requires Grad: {pred_route.requires_grad}")
+        if not pred_route.requires_grad:
+            print("CRITICAL WARNING: Model output does not require gradients. Check model configuration.")
+        
+        # Backward (if needed for Generic/Ours)
+        if run_generic_or_ours:
+            if explain_mode == "action":
+                metric_cfg = KINEMATIC_METRICS.get(metric, KINEMATIC_METRICS["curv_energy"])
+                if metric_cfg["source"] == "route":
+                    target = metric_cfg["fn"](pred_route)
+                else:
+                    target = metric_cfg["fn"](pred_speed_wps)
+            else:
+                # Text mode placeholder
+                target = pred_route.sum() * 0 
+                pass
+
+            if target.requires_grad:
+                self.model.zero_grad()
+                target.backward()
+                
+                # Debug: Check if gradients are flowing
+                print(f"Target Value: {target.item():.6f}, Requires Grad: {target.requires_grad}")
+                if self.grad_maps:
+                    first_key = list(self.grad_maps.keys())[0]
+                    last_key = list(self.grad_maps.keys())[-1]
+                    print(f"Grad Map [{first_key}] Mean: {self.grad_maps[first_key].float().mean():.6e}, Max: {self.grad_maps[first_key].max():.6e}")
+                    print(f"Grad Map [{last_key}] Mean: {self.grad_maps[last_key].float().mean():.6e}, Max: {self.grad_maps[last_key].max():.6e}")
+                else:
+                    print("WARNING: No gradients captured in grad_maps!")
+            else:
+                print("CRITICAL: Target does not require grad, cannot backward.")
+        
+        # Generate Visualizations
+        for method in methods:
+            # Create method-specific subdirectory
+            method_dir = output_dir / method
+            method_dir.mkdir(parents=True, exist_ok=True)
+            
+            if method == "generic":
+                heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps)
+            elif method == "rollout":
+                heatmap = self._get_rollout_relevance(self.attn_maps)
+            elif method == "flow":
+                heatmap = self._get_flow_relevance(self.attn_maps)
+            elif method == "raw":
+                heatmap = self._get_raw_attention(self.attn_maps)
+            elif method == "ours":
+                heatmap = self._get_ours_relevance(self.attn_maps, self.grad_maps, meta)
+            else:
+                continue
+            
+            # Debug: Print heatmap stats
+            if heatmap.numel() > 0:
+                print(f"[{method}] Heatmap Stats - Min: {heatmap.min():.4f}, Max: {heatmap.max():.4f}, Mean: {heatmap.mean():.4f}")
+            
+            overlay = self._create_heatmap_overlay(heatmap, image_path, meta)
+            if overlay is not None:
+                cv2.imwrite(str(method_dir / f"{image_path.stem}.png"), overlay)
+                
+        self._remove_hooks()
+
+    def _build_model(self):
+        # ... (existing code) ...
+        pass # Placeholder to indicate I'm not changing this part in this replacement block, but I need to be careful with line numbers.
+        # Actually I need to replace get_hook too.
+
+    # Re-defining get_hook inside _register_hooks context or as a helper?
+    # It was inside _register_hooks. I need to replace _register_hooks AND get_hook logic.
+    # But get_hook is inside _register_hooks.
+    
+    # Let's replace the whole _register_hooks method and get_hook definition.
+    pass
 
     def _remove_hooks(self):
         for h in self.hooks:
