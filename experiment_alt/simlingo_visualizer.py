@@ -333,6 +333,13 @@ class SimLingoVisualizer:
             def hook(module, input, output):
                 # Debug: Inspect output structure for the first layer
                 if "layer_0" in name and "vision" in name:
+                    # Print Module Structure to find inner attention
+                    print(f"DEBUG: Hook {name} Module Type: {type(module)}")
+                    # Only print structure once
+                    if not hasattr(self, "_printed_structure"):
+                        print(f"DEBUG: Module Structure:\n{str(module)}")
+                        self._printed_structure = True
+                        
                     print(f"DEBUG: Hook {name} Output Type: {type(output)}")
                     if isinstance(output, tuple):
                         print(f"DEBUG: Hook {name} Output Length: {len(output)}")
