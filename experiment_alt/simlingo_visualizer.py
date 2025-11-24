@@ -786,14 +786,25 @@ class SimLingoVisualizer:
         print(f"[Ours] Final R Matrix Stats - Mean: {R.mean():.6e}, Max: {R.max():.6e}")
         print(f"[Ours] R[0, target_idx, image_indices] Stats - Mean: {R[0, target_idx, image_indices].mean():.6e}")
         
-        # DEBUG: Check Raw CAM for the last layer specifically for these indices
+        # DEBUG: Analyze Gradient Flow in Last Layer
         last_name = sorted_keys[-1]
         last_attn = lm_maps[last_name].float()
         last_grad = grad_maps.get(last_name, torch.zeros_like(last_attn)).float()
-        last_raw_cam = last_attn * last_grad
-        print(f"[Ours] Layer {last_name} - Raw CAM[target, image] Mean: {last_raw_cam[0, :, target_idx, image_indices].mean():.6e}")
-        print(f"[Ours] Layer {last_name} - Grad[target, image] Mean: {last_grad[0, :, target_idx, image_indices].mean():.6e}")
-        print(f"[Ours] Layer {last_name} - Attn[target, image] Mean: {last_attn[0, :, target_idx, image_indices].mean():.6e}")
+        
+        # Check which tokens (Queries) have non-zero gradients
+        # grad is [B, H, S, S]. We average over B, H, and Key(S) to see which Query(S) is active.
+        query_grad_mag = last_grad.abs().mean(dim=(0, 1, 3)) # [S]
+        active_indices = torch.nonzero(query_grad_mag > 1e-7).squeeze().tolist()
+        
+        if isinstance(active_indices, int): active_indices = [active_indices]
+        
+        print(f"[Ours] Layer {last_name} - Active Query Indices (Grad > 1e-7): {active_indices}")
+        print(f"[Ours] Layer {last_name} - Grad Magnitude at Target ({target_idx}): {query_grad_mag[target_idx]:.6e}")
+        
+        if active_indices:
+            # If target_idx is not active, suggest the most active one
+            max_idx = torch.argmax(query_grad_mag).item()
+            print(f"[Ours] Suggestion: Most active token is {max_idx} with mag {query_grad_mag[max_idx]:.6e}")
 
         # Extract scores
         # For LLM, B is usually 1 (unless batching multiple prompts).
