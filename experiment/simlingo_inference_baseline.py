@@ -577,6 +577,9 @@ class SimLingoInferenceBaseline:
         self.use_spline = use_spline
         self.spline_smoothing = max(0.0, float(spline_smoothing))
         self.spline_num_samples = spline_num_samples if spline_num_samples and spline_num_samples > 0 else None
+        
+        self.debug_info = {}  # Store debug info for .pt file
+
         # ViT/LLM 모두 어텐션을 수집 (기본 켜짐)
         if enable_vision_hooks is None:
             enable_vision_hooks = True
@@ -689,6 +692,8 @@ class SimLingoInferenceBaseline:
                 layers = lm.block
             
             # print(f"[DEBUG] Found {len(layers)} LLM layers for hooking")
+            self.debug_info["llm_layers_found_for_hooks"] = len(layers)
+            self.debug_info["llm_model_type"] = str(type(lm))
             
             for idx, block in enumerate(layers):
                 self.recorder.register_module(block, f"language_block_{idx}", record_grad=True)
@@ -910,6 +915,7 @@ class SimLingoInferenceBaseline:
             if attn_seq is None:
                 if hasattr(outputs, "attentions"):
                     attn_seq = outputs.attentions
+                    self.debug_info["attn_source"] = "outputs.attentions"
                 elif isinstance(outputs, tuple):
                     # Try to find the tuple element that looks like attentions (tuple of tensors)
                     for item in outputs:
@@ -918,6 +924,7 @@ class SimLingoInferenceBaseline:
                             # Qwen2 has 24 layers.
                             if len(item) >= 10: # Heuristic check
                                 attn_seq = item
+                                self.debug_info["attn_source"] = f"outputs_tuple_item_len_{len(item)}"
                                 break
                     # If still not found, maybe it's the last element?
                     if attn_seq is None and len(outputs) > 0:
@@ -925,8 +932,15 @@ class SimLingoInferenceBaseline:
                          last_item = outputs[-1]
                          if isinstance(last_item, (list, tuple)):
                              attn_seq = last_item
+                             self.debug_info["attn_source"] = "outputs_last_item"
 
                 # print(f"[DEBUG] Fallback to outputs search: {len(attn_seq) if attn_seq else 0} layers")
+            else:
+                self.debug_info["attn_source"] = "stashed_all_attentions"
+
+            self.debug_info["outputs_type"] = str(type(outputs))
+            if isinstance(outputs, tuple):
+                self.debug_info["outputs_len"] = len(outputs)
 
             if attn_seq:
                 for idx, attn in enumerate(attn_seq):
@@ -976,6 +990,7 @@ class SimLingoInferenceBaseline:
                 "text_outputs": self._serialize_text_outputs(text_features),
                 "mode": self.explain_mode,
                 "attention": attention_maps,
+                "debug_info": self.debug_info,
             }
             payload_path = scenario_subdirs["pt"] / f"{record_tag}.pt"
             torch.save(payload, payload_path)
