@@ -525,33 +525,43 @@ class SimLingoVisualizer:
         print(f"Loading model from {self.checkpoint_path}...")
         
         # Load Config
-        cfg = OmegaConf.load(self.config_path)
+        # self.cfg is already loaded in __init__
         
-        # Load Model using the baseline class method (static or similar)
-        # We need to instantiate the model structure first
-        # Since SimLingoInferenceBaseline logic is complex, we reuse its structure if possible
-        # Or we just manually build it as in the original code.
+        # Construct cache_dir as in baseline
+        # We need to handle the case where variant might be a local path or HF ID
+        variant = self.cfg.model.vision_model.variant
+        if "/" in variant:
+            cache_name = variant.split("/")[1]
+        else:
+            cache_name = variant
+            
+        cache_dir = Path("pretrained") / cache_name
+        # Ensure to_absolute_path is available
+        from hydra.utils import to_absolute_path
+        cache_dir = Path(to_absolute_path(str(cache_dir)))
         
-        # Looking at original code (which I can't see fully now but I recall):
-        # It used SimLingoInferenceBaseline logic.
-        # Let's assume we can use the same logic as before.
+        # Instantiate Model with required args
+        # We use self.cfg.model directly
+        # Note: We need to set default dtype to bfloat16 as in baseline if we want exact match,
+        # but for visualization fp32 might be safer unless memory is tight.
+        # Baseline uses bfloat16 for instantiation.
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
         
-        # Re-implementing based on what I saw in Step 236 and context
-        from experiment.simlingo_inference_baseline import SimLingoInferenceBaseline
-        
-        # We need to mock 'self' for SimLingoInferenceBaseline or use its methods?
-        # Actually, SimLingoVisualizer seems to have copied the logic or uses a helper.
-        # Let's look at what was there before.
-        # It was:
-        # model = hydra.utils.instantiate(cfg.model)
-        # checkpoint = torch.load(self.ckpt_path, map_location="cpu")
-        # state_dict = checkpoint["state_dict"]
-        # model.load_state_dict(state_dict, strict=False)
-        # model.to(self.device)
-        
-        # Let's try to reconstruct it robustly.
-        
-        model = hydra.utils.instantiate(cfg.model)
+        try:
+            model = hydra.utils.instantiate(
+                self.cfg.model,
+                cfg_data_module=self.cfg.data_module,
+                processor=self.processor,
+                cache_dir=str(cache_dir),
+                _recursive_=False,
+            )
+        except Exception as e:
+            print(f"Error instantiating model: {e}")
+            # Fallback or re-raise
+            raise e
+            
+        torch.set_default_dtype(default_dtype)
         
         # Load Checkpoint
         if self.checkpoint_path.exists():
@@ -561,14 +571,13 @@ class SimLingoVisualizer:
             else:
                 state_dict = checkpoint
                 
-            # Fix state dict keys if needed (e.g. remove 'model.' prefix if present and model expects it, or vice versa)
-            # Usually SimLingo checkpoints are standard.
             keys = model.load_state_dict(state_dict, strict=False)
             print(f"Model loaded. Missing keys: {len(keys.missing_keys)}, Unexpected keys: {len(keys.unexpected_keys)}")
         else:
             print(f"WARNING: Checkpoint {self.checkpoint_path} not found!")
 
         model.to(self.device)
+        model.eval() # Set to eval mode immediately
         
         # Enable gradients for explanation
         for param in model.parameters():
@@ -610,9 +619,6 @@ class SimLingoVisualizer:
         
         print("Forcing Eager Attention Implementation to capture attention gradients...")
         
-        # Force model to train mode to ensure gradients are tracked
-        model.eval() 
-
         return model
 
     def _remove_hooks(self):
