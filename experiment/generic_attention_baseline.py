@@ -257,7 +257,7 @@ class GenericAttentionTextVisualizer:
         heatmap = self._scores_to_heatmap(token_scores, meta)
         
         # Save Raw Heatmap (Grayscale)
-        heatmap_np = heatmap.detach().cpu().numpy()
+        heatmap_np = heatmap
         heatmap_uint8 = np.uint8(255 * heatmap_np)
         raw_output_path = output_dir / f"{image_path.stem}_raw.png"
         Image.fromarray(heatmap_uint8).save(raw_output_path)

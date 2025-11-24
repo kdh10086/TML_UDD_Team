@@ -209,10 +209,10 @@ class GenericAttentionActionVisualizer:
             raise IndexError(f"Target token index ({source_index}) exceeds recorded attention sequence ({seq_len}).")
         image_token_positions = self._select_image_token_positions(prompt_token_ids, meta["num_total_image_tokens"])
         token_scores = relevance[source_index, image_token_positions]
-        heatmap = self._scores_to_heatmap(torch.tensor(token_scores, device=self.device), meta)
+        heatmap = self._scores_to_heatmap(token_scores.clone().detach().to(self.device), meta)
         
         # Save Raw Heatmap (Grayscale)
-        heatmap_np = heatmap.detach().cpu().numpy()
+        heatmap_np = heatmap
         heatmap_uint8 = np.uint8(255 * heatmap_np)
         raw_output_path = output_dir / f"{image_path.stem}_raw.png"
         Image.fromarray(heatmap_uint8).save(raw_output_path)
