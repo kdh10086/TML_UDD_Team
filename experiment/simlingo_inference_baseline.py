@@ -1456,7 +1456,32 @@ class SimLingoInferenceBaseline:
             template = conv_module.get_conv_template("internlm2-chat")
             for conv_part_idx, conv_part in enumerate(conv):
                 if conv_part["role"] == "assistant":
-                    template.append_message(template.roles[1], None)
+                    # If we have content for assistant, append it.
+                    # Otherwise append None (which usually means "start generation here")
+                    # But here we want to FORCE the content if provided.
+                    content = conv_part.get("content")
+                    # In the loop above, we flattened content to string.
+                    # Wait, the loop above:
+                    # for item in conv:
+                    #     questions.append(item["content"][0]["text"]) <-- This is wrong for assistant!
+                    #     item["content"] = item["content"][0]["text"]
+                    
+                    # The loop above seems to assume everything is user question?
+                    # Let's look at lines 1446-1449.
+                    
+                    # Actually, let's just fix the logic here.
+                    # We want to append the content if it's not None/Empty.
+                    # If assistant_response was passed, it is in conv_part["content"] (as a string now).
+                    
+                    # However, if we want to prompt the model to *continue*, we might need to handle it carefully.
+                    # But for teacher forcing, we want the FULL conversation.
+                    
+                    val = conv_part["content"]
+                    if val and "Waypoints:" in val: # It has our response
+                         template.append_message(template.roles[1], val)
+                    else:
+                         template.append_message(template.roles[1], None)
+
                 elif conv_part["role"] == "user":
                     if conv_part_idx == 0 and "<image>" not in conv_part["content"]:
                         conv_part["content"] = "<image>\n" + conv_part["content"]
