@@ -266,15 +266,27 @@ class VisionRawAttention:
             attn = attn.max(dim=1).values
         return attn
 
-    def _extract_image_scores(self, attn: torch.Tensor, num_image_tokens: int) -> torch.Tensor:
+        # experiment_alt logic:
+        # attn = vision_maps[last_name].float()
+        # return attn.mean(dim=1)[-1, 1:, 1:].sum(dim=0)
+        
+        # attn is [B, S, S] (already mean-ed over heads in _select_layer_attention)
         if attn.dim() != 3:
             raise ValueError(f"Expected tensor of shape [B,S,S], got {attn.shape}")
-        attn = attn.squeeze(0)
-        if attn.dim() != 2:
-            raise ValueError("Unable to squeeze batch dimension from attention tensor.")
-        if 1 + num_image_tokens > attn.size(-1):
-            raise ValueError("Not enough tokens recorded to cover image patches.")
-        scores = attn[0, 1 : 1 + num_image_tokens]
+            
+        # Select Global View (last batch item)
+        # Sum over rows (dim 0 of the S,S matrix) -> relevance of all tokens TO target?
+        # Wait, attn[b, i, j] is attention FROM i TO j.
+        # experiment_alt does: attn.mean(dim=1)[-1, 1:, 1:].sum(dim=0)
+        # This is sum over i (rows) for each j (cols).
+        # So it measures "how much attention does this token j receive from all other tokens i".
+        # This is "Incoming Attention" or "Centrality".
+        
+        scores = attn[-1, 1:, 1:].sum(dim=0)
+        
+        if scores.shape[0] > num_image_tokens:
+            scores = scores[:num_image_tokens]
+            
         scores = scores - scores.min()
         scores = scores / scores.max().clamp_min(1e-6)
         return scores

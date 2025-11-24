@@ -222,18 +222,41 @@ class VisionAttentionFlow:
         num_image_tokens: int,
     ) -> torch.Tensor:
         matrices = self._collect_vision_matrices(attention_maps)
-        # flow vector 초기화: 최상단 CLS 토큰에 단위 유량을 부여
-        seq_len = matrices[0].shape[-1]
-        flow = torch.zeros(seq_len, dtype=matrices[0].dtype, device=matrices[0].device)
-        flow[0] = 1.0
-        for mat in reversed(matrices):
-            attn = mat.mean(dim=1)
-            attn = self._apply_residual(attn)
-            attn = self._apply_discard(attn)
-            attn = attn / attn.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-            attn = attn.squeeze(0)
-            flow = torch.matmul(attn.transpose(-1, -2), flow)
-        scores = flow[1 : 1 + num_image_tokens]
+        
+        # experiment_alt logic for flow:
+        # R = torch.eye(S).expand(B, S, S)
+        # for layer:
+        #   attn_mean = attn.mean(dim=1)
+        #   R = torch.bmm(attn_mean, R)
+        # return R[-1, 1:, 1:].sum(dim=0)
+        
+        first_map = matrices[0]
+        B, _, S, S = first_map.shape # Note: collect_vision_matrices returns [B,H,S,S] or [B,S,S]? 
+        # Wait, collect_vision_matrices returns [B,H,S,S] (averaged over layers if stacked).
+        # Actually in my code it returns [B,H,S,S].
+        
+        # Initialize R
+        R = torch.eye(S, device=first_map.device, dtype=first_map.dtype).unsqueeze(0).expand(B, S, S)
+        
+        for mat in matrices:
+            # mat is [B, H, S, S]
+            attn = mat.mean(dim=1) # [B, S, S]
+            # No residual, no discard (experiment_alt implementation is simple chain mult)
+            # But wait, my previous implementation had residual and discard.
+            # experiment_alt's _get_flow_relevance does NOT have residual or discard.
+            # I will follow experiment_alt for consistency.
+            
+            R = torch.bmm(attn, R)
+            
+        # Select Global View (last batch item) and sum relevance
+        if S <= 1:
+             raise RuntimeError("Not enough tokens for flow.")
+             
+        scores = R[-1, 1:, 1:].sum(dim=0)
+        
+        if scores.shape[0] > num_image_tokens:
+            scores = scores[:num_image_tokens]
+
         scores = scores - scores.min()
         scores = scores / scores.max().clamp_min(1e-6)
         return scores
