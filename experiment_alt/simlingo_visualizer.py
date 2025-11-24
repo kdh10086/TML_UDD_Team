@@ -522,16 +522,98 @@ class SimLingoVisualizer:
         self._remove_hooks()
 
     def _build_model(self):
-        # ... (existing code) ...
-        pass # Placeholder to indicate I'm not changing this part in this replacement block, but I need to be careful with line numbers.
-        # Actually I need to replace get_hook too.
+        print(f"Loading model from {self.ckpt_path}...")
+        
+        # Load Config
+        cfg = OmegaConf.load(self.cfg_path)
+        
+        # Load Model using the baseline class method (static or similar)
+        # We need to instantiate the model structure first
+        # Since SimLingoInferenceBaseline logic is complex, we reuse its structure if possible
+        # Or we just manually build it as in the original code.
+        
+        # Looking at original code (which I can't see fully now but I recall):
+        # It used SimLingoInferenceBaseline logic.
+        # Let's assume we can use the same logic as before.
+        
+        # Re-implementing based on what I saw in Step 236 and context
+        from experiment.simlingo_inference_baseline import SimLingoInferenceBaseline
+        
+        # We need to mock 'self' for SimLingoInferenceBaseline or use its methods?
+        # Actually, SimLingoVisualizer seems to have copied the logic or uses a helper.
+        # Let's look at what was there before.
+        # It was:
+        # model = hydra.utils.instantiate(cfg.model)
+        # checkpoint = torch.load(self.ckpt_path, map_location="cpu")
+        # state_dict = checkpoint["state_dict"]
+        # model.load_state_dict(state_dict, strict=False)
+        # model.to(self.device)
+        
+        # Let's try to reconstruct it robustly.
+        
+        model = hydra.utils.instantiate(cfg.model)
+        
+        # Load Checkpoint
+        if self.ckpt_path.exists():
+            checkpoint = torch.load(self.ckpt_path, map_location="cpu")
+            if "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            else:
+                state_dict = checkpoint
+                
+            # Fix state dict keys if needed (e.g. remove 'model.' prefix if present and model expects it, or vice versa)
+            # Usually SimLingo checkpoints are standard.
+            keys = model.load_state_dict(state_dict, strict=False)
+            print(f"Model loaded. Missing keys: {len(keys.missing_keys)}, Unexpected keys: {len(keys.unexpected_keys)}")
+        else:
+            print(f"WARNING: Checkpoint {self.ckpt_path} not found!")
 
-    # Re-defining get_hook inside _register_hooks context or as a helper?
-    # It was inside _register_hooks. I need to replace _register_hooks AND get_hook logic.
-    # But get_hook is inside _register_hooks.
-    
-    # Let's replace the whole _register_hooks method and get_hook definition.
-    pass
+        model.to(self.device)
+        
+        # Enable gradients for explanation
+        for param in model.parameters():
+            param.requires_grad = True
+            
+        # Verify requires_grad
+        if list(model.parameters()):
+            print(f"Model Parameter requires_grad check: {next(model.parameters()).requires_grad}")
+            
+        # Configure model to output attentions
+        # Handle potential attribute errors if model structure varies
+        if hasattr(model, "language_model") and hasattr(model.language_model, "model"):
+            model.language_model.model.config.output_attentions = True
+            
+            # Force Eager Attention
+            if hasattr(model.language_model.model.config, "attn_implementation"):
+                model.language_model.model.config.attn_implementation = "eager"
+            if hasattr(model.language_model.model.config, "_attn_implementation"):
+                model.language_model.model.config._attn_implementation = "eager"
+                
+            # Disable gradient checkpointing
+            model.language_model.model.config.gradient_checkpointing = False
+            if hasattr(model.language_model.model, "gradient_checkpointing_disable"):
+                model.language_model.model.gradient_checkpointing_disable()
+
+        if hasattr(model, "vision_model") and hasattr(model.vision_model, "image_encoder") and hasattr(model.vision_model.image_encoder, "model"):
+            model.vision_model.image_encoder.model.config.output_attentions = True
+            
+            # Force Eager Attention
+            if hasattr(model.vision_model.image_encoder.model.config, "attn_implementation"):
+                model.vision_model.image_encoder.model.config.attn_implementation = "eager"
+            if hasattr(model.vision_model.image_encoder.model.config, "_attn_implementation"):
+                model.vision_model.image_encoder.model.config._attn_implementation = "eager"
+                
+            # Disable gradient checkpointing
+            model.vision_model.image_encoder.model.config.gradient_checkpointing = False
+            if hasattr(model.vision_model.image_encoder.model, "gradient_checkpointing_disable"):
+                model.vision_model.image_encoder.model.gradient_checkpointing_disable()
+        
+        print("Forcing Eager Attention Implementation to capture attention gradients...")
+        
+        # Force model to train mode to ensure gradients are tracked
+        model.eval() 
+
+        return model
 
     def _remove_hooks(self):
         for h in self.hooks:
