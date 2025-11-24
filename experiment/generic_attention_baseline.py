@@ -299,19 +299,22 @@ class GenericAttentionTextVisualizer:
         prompt_len = len(prompt_token_ids)
         generated_len = len(text_outputs.get("token_ids", []))
         seq_len = relevance.shape[0]
+        # If recording shorter than expected, clip lengths safely
         if seq_len < prompt_len + generated_len:
-            raise RuntimeError(
-                f"Recorded sequence ({seq_len}) shorter than prompt+generated tokens ({prompt_len + generated_len})."
+            print(
+                f"[WARN] seq_len {seq_len} < prompt+gen {prompt_len + generated_len}; clipping indices for {image_path.name}"
             )
+            prompt_len = min(prompt_len, seq_len)
+            generated_len = max(0, min(generated_len, seq_len - prompt_len))
         token_index = int(target_info.get("token_index", generated_len - 1))
-        source_index = prompt_len + token_index
-        if source_index >= seq_len:
-            raise IndexError(
-                f"Target token index ({source_index}) exceeds recorded attention sequence ({seq_len})."
-            )
-        image_token_positions = self._select_image_token_positions(
-            prompt_token_ids, meta["num_total_image_tokens"]
-        )
+        token_index = max(0, min(token_index, max(generated_len - 1, 0)))
+        source_index = min(prompt_len + token_index, seq_len - 1)
+        image_token_positions = [
+            pos for pos in self._select_image_token_positions(prompt_token_ids, meta["num_total_image_tokens"])
+            if pos < seq_len
+        ]
+        if not image_token_positions:
+            raise RuntimeError("No image token positions within recorded sequence.")
         token_scores = relevance[source_index, image_token_positions]
         heatmap = self._scores_to_heatmap(token_scores, meta)
         
