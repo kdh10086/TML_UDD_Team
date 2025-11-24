@@ -172,9 +172,11 @@ class InternVLChatModel(PreTrainedModel):
             return_dict=return_dict,
         )
         # Use the attentions returned by the model directly
+        print(f"[DEBUG] InternVLChatModel.forward: output_attentions={output_attentions}, outputs keys={outputs.keys() if hasattr(outputs, 'keys') else 'tuple'}")
         if outputs.attentions is not None:
             # Stash for external retrieval (e.g. by SimLingoInferenceBaseline)
             self.all_attentions = outputs.attentions
+            print(f"[DEBUG] Stashed {len(self.all_attentions)} attention layers")
             for attn in outputs.attentions:
                 if attn is not None and torch.is_tensor(attn):
                     try:
@@ -182,6 +184,7 @@ class InternVLChatModel(PreTrainedModel):
                     except Exception:
                         pass
         else:
+            print("[DEBUG] outputs.attentions is None!")
             self.all_attentions = None
         
         logits = outputs.logits
