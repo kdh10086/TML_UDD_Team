@@ -304,7 +304,7 @@ class VisionAttentionFlow:
         route_overlay_dir: Optional[Path],
         speed_overlay_dir: Optional[Path],
     ) -> np.ndarray:
-        heatmap_np = heatmap.detach().cpu().numpy()
+        heatmap_np = heatmap.detach().float().cpu().numpy()
         image = np.array(Image.open(image_path).convert("RGB"), dtype=np.float32) / 255.0
         blended = show_cam_on_image(image, heatmap_np, self.colormap_code, self.alpha)
         blended = overlay_trajectories(blended, record_tag, route_overlay_dir, speed_overlay_dir)
