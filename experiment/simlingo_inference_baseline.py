@@ -660,18 +660,18 @@ class SimLingoInferenceBaseline:
             vision_model = getattr(vision_container, "model", None)
             if vision_model is not None:
                 # top-level AutoModel (captures BaseModelOutput.attentions if provided)
-                self.recorder.register_module(vision_model, "vision_model_top", record_grad=True)
+                self.recorder.register_module(vision_model, "vision_model_top", record_grad=False)
                 # inner vision encoder (e.g., vision_model.encoder.layers)
                 core = getattr(vision_model, "vision_model", vision_model)
                 if hasattr(core, "encoder"):
                     for idx, block in enumerate(core.encoder.layers):
-                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=True)
+                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
                 # attention submodules directly (to force per-layer attn capture)
                 for sub_name, sub_module in vision_model.named_modules():
                     cls = sub_module.__class__.__name__.lower()
                     if "attention" in cls or "attn" in sub_name.lower():
                         safe_name = sub_name.replace(".", "_")
-                        self.recorder.register_module(sub_module, f"vision_attn_{safe_name}", record_grad=True)
+                        self.recorder.register_module(sub_module, f"vision_attn_{safe_name}", record_grad=False)
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
@@ -907,8 +907,13 @@ class SimLingoInferenceBaseline:
                         continue
                     attn_tensor = attn.detach().to("cpu")
                     grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
-                    attn_entries.append({"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)})
-                    attention_maps[f"language_attn_layer_{idx}"] = [attn_entries[-1]]
+                    
+                    # Force save to attention_maps with correct key
+                    entry = {"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}
+                    key = f"language_attn_layer_{idx}"
+                    # Overwrite or append? The user wants ALL layers. 
+                    # If recorder captured something, it might be partial. We trust this explicit capture more.
+                    attention_maps[key] = [entry]
             
             # 추가: 비전 모델 attentions 저장 (from _patched_extract_feature)
             # We access it via the vision model instance where we attached it
