@@ -396,6 +396,8 @@ class AttentionRecorder:
                 # 불필요한 참조를 끊어 메모리 누수를 방지
                 tensor.grad = None
         self.records.append({"tag": self._current_tag, "maps": aggregated})
+        if not aggregated and os.environ.get("ATTN_DEBUG"):
+            print(f"[AttentionRecorder] No attentions captured for tag={self._current_tag}")
         self._active_buffers = None
         self._current_tag = None
         return aggregated
@@ -539,16 +541,21 @@ class SimLingoInferenceBaseline:
         """비전/언어 트랜스포머 블록 전체에 레코더 훅을 연결합니다."""
         # 비전 인코더 블록 훅 등록
         if self.enable_vision_hooks:
-            vision_model = getattr(self.model.vision_model.image_encoder.model, "vision_model", None)
+            vision_container = getattr(self.model.vision_model, "image_encoder", None)
+            vision_model = getattr(vision_container, "model", None)
             if vision_model is not None:
-                # hook the top module to capture attentions list
-                self.recorder.register_module(vision_model, "vision_block_top", record_grad=True)
-                if hasattr(vision_model, "encoder"):
-                    for idx, block in enumerate(vision_model.encoder.layers):
+                # top-level AutoModel (captures BaseModelOutput.attentions if provided)
+                self.recorder.register_module(vision_model, "vision_model_top", record_grad=True)
+                # inner vision encoder (e.g., vision_model.encoder.layers)
+                core = getattr(vision_model, "vision_model", vision_model)
+                if hasattr(core, "encoder"):
+                    for idx, block in enumerate(core.encoder.layers):
                         self.recorder.register_module(block, f"vision_block_{idx}", record_grad=True)
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
+            # top-level CausalLM/LLM module (captures BaseModelOutput.attentions if provided)
+            self.recorder.register_module(lm, "language_model_top")
             if hasattr(lm, "model") and hasattr(lm.model, "layers"):
                 layers = lm.model.layers
             elif hasattr(lm, "layers"):

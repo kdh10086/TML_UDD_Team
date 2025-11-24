@@ -118,6 +118,8 @@ cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
 unzip /mnt/data1/new_sample_dataset.zip -d /root/TML_UDD_Team/data/
 #원본 데이터셋 복사 (옵션)
 unzip /mnt/data1/DREYEVE_DATA_filtered.zip -d /root/TML_UDD_Team/data/
+#샘플 작은 데이터셋 복사 (옵션)
+unzip /mnt/data1/sample_small.zip -d /root/TML_UDD_Team/data/
 ```
 
 ## 5) 데이터 배치
@@ -241,7 +243,7 @@ python -m experiment.vit_raw_attention \
 
 - 압축 해제: `unzip <input.zip> -d <output_dir>`  
   예: `unzip sim_outputs.zip -d ./experiment_outputs/` → `./experiment_outputs/`에 압축해제
-  
+
 - scp 다운로드(로컬에서 실행): `scp -P <PORT> <user>@<host>:<remote_path.zip> <local_dest_dir>/`  
   예: `scp -P 30002 root@202.39.40.153:/root/TML_UDD_Team/experiment_outputs/sim_outputs.zip ~/home/컴퓨터이름/TML_UDD_Team/experiment_outputs/cloud_outputs/`
 
@@ -257,4 +259,7 @@ cd /mnt/data1/
 gdown --fuzzy 'https://drive.google.com/file/d/1CfmRcnSZepCG0k9J4n5lkQZXd_tTxr7B/view?usp=drive_link' -O new_sample_dataset.zip
 #DREYEVE_DATA_filtered 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/1-VgGkHAf5WNOCEISZXjNazaaEn3vE9r0/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
+#샘플 작은 데이터셋
+gdown --fuzzy 'https://drive.google.com/file/d/1KgWRInvxE9hTf_hKMo58-fzZOAGIsaP5/view?usp=sharing' -O sample_small.zip
+
 ```
