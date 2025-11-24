@@ -173,12 +173,16 @@ class InternVLChatModel(PreTrainedModel):
         )
         # Use the attentions returned by the model directly
         if outputs.attentions is not None:
+            # Stash for external retrieval (e.g. by SimLingoInferenceBaseline)
+            self.all_attentions = outputs.attentions
             for attn in outputs.attentions:
                 if attn is not None and torch.is_tensor(attn):
                     try:
                         attn.retain_grad()
                     except Exception:
                         pass
+        else:
+            self.all_attentions = None
         
         logits = outputs.logits
 
