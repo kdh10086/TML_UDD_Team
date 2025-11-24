@@ -175,17 +175,41 @@ class GenericAttentionActionVisualizer:
                 print(f"Using image root: {image_root}")
                 route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
 
-                for image_path in tqdm(image_paths, desc=f"GenericAction ({scene_dir.name})", unit="img"):
-                    # Find corresponding payload for the image
-                    tag = image_path.stem
-                    pt_path = self._payload_index.get(tag)
-                    if pt_path is None:
-                        print(f"Warning: Payload not found for image {image_path.name}. Skipping.")
-                        continue
+                # Prepare output directories
+                final_dir = output_dir / "final"
+                final_dir.mkdir(parents=True, exist_ok=True)
+                
+                raw_dir = output_dir / "raw"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                
+                pt_log_path = output_dir / "pt_log.txt"
 
-                    self._process_single_image(
-                        image_path, pt_path, scenario_output_dir, suffix, route_dir, speed_dir, scenario_raw_output_dir
-                    )
+                # If target_files is provided, we iterate over them.
+                # But wait, ViT scripts iterate over PAYLOADS, not images.
+                # "for tag, payload_path in sorted(self._payload_index.items()):"
+                # We need to filter payloads based on target_files (images).
+                
+                if target_files:
+                    target_stems = {p.stem for p in target_files}
+                    # Filter payload index
+                    filtered_index = {k: v for k, v in self._payload_index.items() if k in target_stems}
+                    items_to_process = sorted(filtered_index.items())
+                else:
+                    items_to_process = sorted(self._payload_index.items())
+
+                with open(pt_log_path, "a") as log_file:
+                    for tag, payload_path in tqdm(items_to_process, desc=f"GenericAction ({scene_dir.name if scene_dir else '?'})", unit="img"):
+                        # Log the PT file usage
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        log_file.write(f"[{timestamp}] Processed: {payload_path.resolve()}\n")
+                        
+                        payload = torch.load(payload_path, map_location=self.device)
+                        image_path = self._resolve_image_path(payload, scene_dir)
+                        route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
+                        
+                        self._process_cached_payload(
+                            payload, image_path, final_dir, suffix, route_dir, speed_dir, raw_dir
+                        )
                 return # Exit after processing images from the first valid image_root
             else:
                 print(f"[DEBUG] Candidate {cand} does not exist or is not a directory.")
@@ -292,32 +316,41 @@ class GenericAttentionActionVisualizer:
         candidate.mkdir(parents=True, exist_ok=False)
         return candidate
 
+    @staticmethod
+    def _resolve_grid_size(n: int, h: int, w: int) -> tuple:
+        """Find factors of n that best match aspect ratio h/w"""
+        target_ratio = h / w
+        best_h, best_w = int(math.sqrt(n)), int(math.sqrt(n))
+        min_error = float("inf")
+        
+        for i in range(1, int(math.sqrt(n)) + 1):
+            if n % i == 0:
+                # Factor pair (i, n//i)
+                h1, w1 = i, n // i
+                ratio1 = h1 / w1
+                err1 = abs(ratio1 - target_ratio)
+                if err1 < min_error:
+                    min_error = err1
+                    best_h, best_w = h1, w1
+                
+                # Factor pair (n//i, i)
+                h2, w2 = n // i, i
+                ratio2 = h2 / w2
+                err2 = abs(ratio2 - target_ratio)
+                if err2 < min_error:
+                    min_error = err2
+                    best_h, best_w = h2, w2
+        return best_h, best_w
+
     def _scores_to_heatmap(self, scores: torch.Tensor, meta: Dict[str, Any]) -> np.ndarray:
         total_tokens = meta["num_total_image_tokens"]
         orig_h = meta["original_height"]
         orig_w = meta["original_width"]
         
-        # Attempt to find best H, W such that H*W = total_tokens and H/W ~ orig_h/orig_w
-        best_h, best_w = int(math.sqrt(total_tokens)), int(math.sqrt(total_tokens))
-        min_error = float("inf")
-        target_ratio = orig_w / orig_h
+        best_h, best_w = self._resolve_grid_size(total_tokens, orig_h, orig_w)
         
-        for h in range(1, int(math.sqrt(total_tokens)) + 1):
-            if total_tokens % h == 0:
-                w = total_tokens // h
-                # Check pair (h, w)
-                ratio = w / h
-                error = abs(ratio - target_ratio)
-                if error < min_error:
-                    min_error = error
-                    best_h, best_w = h, w
-                
-                # Check pair (w, h)
-                ratio_inv = h / w
-                error_inv = abs(ratio_inv - target_ratio)
-                if error_inv < min_error:
-                    min_error = error_inv
-                    best_h, best_w = w, h
+        if best_h * best_w != total_tokens:
+            raise RuntimeError(f"Calculated grid {best_h}x{best_w}={best_h*best_w} != total_tokens {total_tokens}")
 
         heatmap = scores.reshape(best_h, best_w).detach().float().to("cpu").numpy()
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)

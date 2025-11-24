@@ -109,6 +109,15 @@ class VisionRawAttention:
         if not self._payload_index:
             raise RuntimeError("No payloads found under payload_root.")
 
+        # Prepare output directories
+        final_dir = output_dir / "final"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        
+        raw_dir = output_dir / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        
+        pt_log_path = output_dir / "pt_log.txt"
+
         if target_files:
             target_stems = {p.stem for p in target_files}
             filtered_index = {k: v for k, v in self._payload_index.items() if k in target_stems}
@@ -116,13 +125,18 @@ class VisionRawAttention:
         else:
             items_to_process = sorted(self._payload_index.items())
 
-        for tag, payload_path in tqdm(items_to_process, desc=f"ViTRaw ({scene_dir.name if scene_dir else '?'})", unit="img"):
-            payload = torch.load(payload_path, map_location=self.device)
-            image_path = self._resolve_image_path(payload, scene_dir)
-            route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
-            self._process_cached_payload(
-                payload, image_path, scenario_output_dir, suffix, route_dir, speed_dir, scenario_raw_output_dir
-            )
+        with open(pt_log_path, "a") as log_file:
+            for tag, payload_path in tqdm(items_to_process, desc=f"ViTRaw ({scene_dir.name if scene_dir else '?'})", unit="img"):
+                # Log the PT file usage
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                log_file.write(f"[{timestamp}] Processed: {payload_path.resolve()}\n")
+                
+                payload = torch.load(payload_path, map_location=self.device)
+                image_path = self._resolve_image_path(payload, scene_dir)
+                route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
+                self._process_cached_payload(
+                    payload, image_path, final_dir, suffix, route_dir, speed_dir, raw_dir
+                )
 
     def _process_cached_payload(
         self,
@@ -315,6 +329,32 @@ class VisionRawAttention:
         scores = scores / scores.max().clamp_min(1e-6)
         return scores
 
+    @staticmethod
+    def _resolve_grid_size(n: int, h: int, w: int) -> Tuple[int, int]:
+        # Find factors of n that best match aspect ratio h/w
+        target_ratio = h / w
+        best_h, best_w = int(math.sqrt(n)), int(math.sqrt(n))
+        min_error = float("inf")
+        
+        for i in range(1, int(math.sqrt(n)) + 1):
+            if n % i == 0:
+                # Factor pair (i, n//i)
+                h1, w1 = i, n // i
+                ratio1 = h1 / w1
+                err1 = abs(ratio1 - target_ratio)
+                if err1 < min_error:
+                    min_error = err1
+                    best_h, best_w = h1, w1
+                
+                # Factor pair (n//i, i)
+                h2, w2 = n // i, i
+                ratio2 = h2 / w2
+                err2 = abs(ratio2 - target_ratio)
+                if err2 < min_error:
+                    min_error = err2
+                    best_h, best_w = h2, w2
+        return best_h, best_w
+
     def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
         num_views = int(meta["num_patch_views"])
         tokens_per_view = int(meta["num_image_tokens_per_patch"])
@@ -323,14 +363,19 @@ class VisionRawAttention:
             raise RuntimeError(
                 f"Token score length ({token_scores.numel()}) does not match meta ({total_tokens})."
             )
-        grid = int(math.sqrt(tokens_per_view))
-        if grid * grid != tokens_per_view:
-            raise RuntimeError("Tokens per patch do not form a square grid.")
-        scores = token_scores.view(num_views, 1, grid, grid).mean(dim=0)
-        H = int(meta["original_height"])
-        W = int(meta["original_width"])
-        scores = scores.unsqueeze(0) # [1, 1, grid, grid]
-        heatmap = F.interpolate(scores, size=(H, W), mode="bilinear", align_corners=False)
+        
+        H_orig = int(meta["original_height"])
+        W_orig = int(meta["original_width"])
+        
+        grid_h, grid_w = self._resolve_grid_size(tokens_per_view, H_orig, W_orig)
+        
+        if grid_h * grid_w != tokens_per_view:
+             raise RuntimeError(f"Calculated grid {grid_h}x{grid_w} != tokens_per_view {tokens_per_view}")
+
+        scores = token_scores.view(num_views, 1, grid_h, grid_w).mean(dim=0)
+        
+        scores = scores.unsqueeze(0) # [1, 1, grid_h, grid_w]
+        heatmap = F.interpolate(scores, size=(H_orig, W_orig), mode="bilinear", align_corners=False)
         return heatmap.squeeze(0).squeeze(0)
 
     def _render_overlay(

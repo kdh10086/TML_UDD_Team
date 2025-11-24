@@ -209,21 +209,9 @@ def main():
                     target_files=batch_files
                 )
                 
-                # Flatten output directories
-                def flatten_and_rename(target_dir: Path, suffix_str: str):
-                    for subdir in target_dir.iterdir():
-                        if subdir.is_dir() and subdir.name.startswith(scenario_name):
-                            for f in subdir.glob("*"):
-                                new_name = f.name
-                                if f.name.endswith(f"_{suffix_str}.png"):
-                                    new_name = f.name.replace(f"_{suffix_str}.png", ".png")
-                                dest = target_dir / new_name
-                                if not dest.exists():
-                                    shutil.move(str(f), str(dest))
-                            subdir.rmdir()
-
-                flatten_and_rename(final_dir, name)
-                flatten_and_rename(raw_dir, "raw")
+                # Flattening logic removed as visualizers now handle output structure (final/raw/pt_log.txt)
+                # flatten_and_rename(final_dir, name)
+                # flatten_and_rename(raw_dir, "raw")
                 
                 # Explicit cleanup
                 gc.collect()
@@ -258,6 +246,16 @@ def main():
         # --- Visualizations (Text) ---
         print(f"[Pipeline] Running Visualizations (Text-dependent)... PT Source: {pt_text_source}")
         run_visualizers_for_batch(text_visualizers, batch_files)
+        
+        # --- Cleanup PT Files ---
+        # After all visualizations are done for this batch, delete PT files to save space
+        print(f"[Pipeline] Cleaning up PT files for batch {batch_idx + 1}...")
+        if pt_action_source.exists():
+            shutil.rmtree(pt_action_source)
+            print(f"[Pipeline]   Deleted: {pt_action_source}")
+        if pt_text_source.exists():
+            shutil.rmtree(pt_text_source)
+            print(f"[Pipeline]   Deleted: {pt_text_source}")
 
     print(f"\n[Pipeline] Done! Results saved to {base_output_dir}")
     
