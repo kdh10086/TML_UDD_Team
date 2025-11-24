@@ -1350,12 +1350,15 @@ class SimLingoInferenceBaseline:
             # This is expensive but safe.
             prompt_only_input, _ = self._prepare_driving_input(image_path, current_speed, append_response="")
             prompt_len = prompt_only_input.prompt.phrase_ids.shape[1]
+            print(f"[DEBUG] Prompt len: {prompt_len}, Full seq len: {logits.shape[1]}")
             
             # Generated part logits
             gen_logits = logits[:, prompt_len:, :] # [B, GenLen, Vocab]
+            print(f"[DEBUG] Gen logits shape: {gen_logits.shape}")
             
             if gen_logits.shape[1] == 0:
                 # Fallback if no text generated
+                print(f"[DEBUG] No text generated (gen_logits is empty).")
                 return None, {"error": "no_text_generated"}
                 
             # Construct text_features dict for _compute_text_target
