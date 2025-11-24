@@ -554,7 +554,7 @@ class GenericAttentionTextVisualizer:
                     min_error = error_inv
                     best_h, best_w = w, h
 
-        heatmap = scores.reshape(best_h, best_w).detach().to("cpu").numpy()
+        heatmap = scores.reshape(best_h, best_w).detach().float().to("cpu").numpy()
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
         heatmap = cv2.resize(heatmap, (orig_w, orig_h))
         return heatmap
