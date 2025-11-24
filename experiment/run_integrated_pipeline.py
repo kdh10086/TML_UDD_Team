@@ -285,11 +285,19 @@ def main():
         
         # If we found scenarios, process all of them
         if potential_scenarios:
-            print(f"[Pipeline] Detected dataset directory with {len(potential_scenarios)} scenarios")
-            print(f"[Pipeline] Scenarios: {[s.name for s in potential_scenarios]}\n")
+            # Create dataset-level output directory
+            dataset_name = input_path.name
+            dataset_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            dataset_output_root = base_output_root / f"{dataset_name}_{dataset_timestamp}"
+            dataset_output_root.mkdir(parents=True, exist_ok=True)
+            
+            print(f"[Pipeline] Detected dataset directory: {dataset_name}")
+            print(f"[Pipeline] Found {len(potential_scenarios)} scenarios")
+            print(f"[Pipeline] Scenarios: {[s.name for s in potential_scenarios]}")
+            print(f"[Pipeline] Dataset output directory: {dataset_output_root}\n")
             
             for scenario in sorted(potential_scenarios):
-                process_scenario(scenario, args.batch_size, args.device, base_output_root)
+                process_scenario(scenario, args.batch_size, args.device, dataset_output_root)
         else:
             # Treat input_path itself as a scenario
             print(f"[Pipeline] Processing single scenario: {input_path.name}")
