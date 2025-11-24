@@ -1376,6 +1376,7 @@ class SimLingoInferenceBaseline:
             
             full_ids = tf_input.prompt.phrase_ids
             gen_ids = full_ids[:, prompt_len:] # [B, GenLen]
+            print(f"[DEBUG] full_ids shape: {full_ids.shape}, gen_ids shape: {gen_ids.shape}")
             
             # Gather logits for these ids
             # gen_logits: [B, GenLen, Vocab]
@@ -1385,8 +1386,10 @@ class SimLingoInferenceBaseline:
             # gen_logits.gather(2, gen_ids.unsqueeze(-1)).squeeze(-1)
             
             token_scores = torch.gather(gen_logits, 2, gen_ids.unsqueeze(-1)).squeeze(-1)
+            print(f"[DEBUG] token_scores shape after gather: {token_scores.shape}")
             if token_scores.dim() > 1:
                 token_scores = token_scores.squeeze(0) # [GenLen]
+            print(f"[DEBUG] token_scores shape final: {token_scores.shape}")
             
             # Also need token_ids, token_strings for meta
             token_ids = gen_ids.squeeze(0)
