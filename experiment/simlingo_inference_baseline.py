@@ -29,6 +29,7 @@ from omegaconf import OmegaConf
 from PIL import Image, ImageDraw
 from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoProcessor
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention
 
 # 어떤 위치에서 실행해도 external/simlingo 모듈을 불러올 수 있도록 경로 추가
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,26 @@ if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
 LOCAL_HF_MODULES = REPO_ROOT / "experiment" / "InternVL2-1B"
 if LOCAL_HF_MODULES.exists():
     os.environ["HF_MODULES_CACHE"] = str(LOCAL_HF_MODULES.resolve())
+
+# Patch Qwen2Attention forward to stash attn weights for all layers/heads
+_orig_qwen2_attn_forward = Qwen2Attention.forward
+
+
+def _patched_qwen2_attn_forward(self, *args, **kwargs):
+    output_attentions = kwargs.get("output_attentions", False) or True
+    kwargs["output_attentions"] = output_attentions
+    hidden_states, attn_weights, past_key_value = _orig_qwen2_attn_forward(self, *args, **kwargs)
+    # attn_weights: [batch, heads, tgt_len, src_len]
+    self.attn_map = attn_weights
+    if attn_weights is not None:
+        attn_weights.retain_grad()
+        self.attn_map_grad = attn_weights.grad
+    else:
+        self.attn_map_grad = None
+    return hidden_states, attn_weights, past_key_value
+
+
+Qwen2Attention.forward = _patched_qwen2_attn_forward
 
 from simlingo_training.models.driving import DrivingModel
 from simlingo_training.models.encoder import internvl2_model as ivl
