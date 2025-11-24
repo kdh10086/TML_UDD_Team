@@ -688,8 +688,12 @@ class SimLingoVisualizer:
             # R = R + CAM * R
             R = R + torch.bmm(cam, R)
             
-        # Extract Relevance of Image Tokens w.r.t Target
-        target_idx = S - 1 # Last token
+        # Dynamically select target index based on max gradient in last layer
+        last_name = sorted_keys[-1]
+        last_grad = grad_maps.get(last_name, torch.zeros_like(lm_maps[last_name])).float()
+        query_grad_mag = last_grad.abs().mean(dim=(0, 1, 3))
+        target_idx = torch.argmax(query_grad_mag).item()
+        print(f"[Generic] Dynamic Target Index: {target_idx} (Grad Mag: {query_grad_mag[target_idx]:.6e})")
         
         image_indices = meta.get("image_token_indices", [])
         if not image_indices:
@@ -703,25 +707,6 @@ class SimLingoVisualizer:
             
         print(f"DEBUG: Selected {len(image_indices)} image indices (Global View). First: {image_indices[0]}, Last: {image_indices[-1]}")
         
-        # Check gradients before loop
-        print(f"DEBUG: Checking gradients for {len(sorted_keys)} layers...")
-        
-        for name in sorted_keys:
-            attn = lm_maps[name].float()
-            grad = grad_maps.get(name, torch.zeros_like(attn)).float()
-            
-            if grad.abs().sum() == 0:
-                 # Only print for the first few to avoid spam, or if it's the last layer
-                 if name == sorted_keys[-1]:
-                     print(f"DEBUG: Layer {name} has ZERO gradient!")
-            
-            # Chefer Rule: E_h [ (A * G)^+ ]
-            cam = attn * grad
-            cam = cam.clamp(min=0).mean(dim=1) # [B, S, S]
-            
-            # R = R + CAM * R
-            R = R + torch.bmm(cam, R)
-            
         print(f"DEBUG: Final R Matrix Stats - Mean: {R.mean():.6e}, Max: {R.max():.6e}")
         print(f"DEBUG: R[0, target_idx, image_indices] Stats - Mean: {R[0, target_idx, image_indices].mean():.6e}")
 
