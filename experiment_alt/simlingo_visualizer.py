@@ -826,16 +826,12 @@ class SimLingoVisualizer:
             if n == 0: return np.zeros((orig_h, orig_w), dtype=np.float32)
             
             # Determine grid dimensions
-            if is_global:
-                # Global view is usually square
-                grid_size = int(np.sqrt(n))
-                if grid_size * grid_size == n:
-                    h_grid, w_grid = grid_size, grid_size
-                else:
-                    # Fallback for non-square global view?
-                    h_grid, w_grid = 1, n
+            # Priority 1: Perfect Square (Most common for ViT/Global)
+            sqrt_n = int(np.sqrt(n))
+            if sqrt_n * sqrt_n == n:
+                h_grid, w_grid = sqrt_n, sqrt_n
             else:
-                # Tiles: Use Aspect Ratio Matching
+                # Priority 2: Aspect Ratio Matching (For Tiles or non-square Global)
                 target_ratio = orig_h / orig_w
                 best_w = 1
                 min_error = float('inf')
