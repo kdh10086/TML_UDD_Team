@@ -38,6 +38,9 @@ from simlingo_training.models.driving import DrivingModel
 from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
 from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
 from team_code.simlingo_utils import get_camera_extrinsics, get_camera_intrinsics, project_points
+from experiment.vision_attn_patch import patch_vision_attention
+
+patch_vision_attention()
 from experiment.simlingo_patches import patch_simlingo
 
 patch_simlingo()
