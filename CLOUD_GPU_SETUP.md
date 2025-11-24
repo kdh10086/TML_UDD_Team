@@ -115,7 +115,7 @@ cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
 ### Persistent Storage에 저장된 데이터셋을 /UDD_TML_Team/data/로 복사, 압축해제
 ```bash
 #샘플 데이터셋 복사
-unzip /mnt/data1/sample_dataset.zip -d /root/TML_UDD_Team/data/
+unzip /mnt/data1/new_sample_dataset.zip -d /root/TML_UDD_Team/data/
 #원본 데이터셋 복사 (옵션)
 unzip /mnt/data1/DREYEVE_DATA_filtered.zip -d /root/TML_UDD_Team/data/
 ```
@@ -215,7 +215,7 @@ python -m experiment.vit_raw_attention \
 python3 -m pip install --upgrade gdown
 cd /mnt/data1/
 #샘플 데이터셋
-gdown --fuzzy 'https://drive.google.com/file/d/171yNE__202KXOhES2ZnhKLjiwfcPafjk/view?usp=sharing' -O sample_dataset.zip
+gdown --fuzzy 'https://drive.google.com/file/d/1CfmRcnSZepCG0k9J4n5lkQZXd_tTxr7B/view?usp=drive_link' -O new_sample_dataset.zip
 #DREYEVE_DATA_filtered 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/1-VgGkHAf5WNOCEISZXjNazaaEn3vE9r0/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
 ```
