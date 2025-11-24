@@ -659,11 +659,8 @@ class SimLingoVisualizer:
             # R = R + CAM * R
             R = R + torch.bmm(cam, R)
             
-        # Dynamically select target index based on max gradient in last layer
-        last_name = sorted_keys[-1]
-        last_grad = grad_maps.get(last_name, torch.zeros_like(lm_maps[last_name])).float()
-        query_grad_mag = last_grad.abs().mean(dim=(0, 1, 3))
-        target_idx = torch.argmax(query_grad_mag).item()
+        # Match baseline: Use the last token as the target
+        target_idx = -1
         
         image_indices = meta.get("image_token_indices", [])
         if not image_indices:
@@ -671,13 +668,7 @@ class SimLingoVisualizer:
             
         # Select Global View tokens (last num_image_tokens_per_patch)
         num_tokens = meta.get("num_image_tokens_per_patch", 256)
-        if len(image_indices) > num_tokens:
-            # Use Tile tokens for High-Res Heatmap (Exclude Global View at the end)
-            image_indices = image_indices[:-num_tokens]
-            print(f"[Generic] Using {len(image_indices)} Tile tokens for High-Res Heatmap.")
-        else:
-            # Only Global View exists
-            pass
+        # Note: We use all tokens (Tiles + Global) as per latest fix
             
         scores = R[0, target_idx, image_indices]
         return scores
@@ -730,28 +721,12 @@ class SimLingoVisualizer:
         if len(image_indices) > num_tokens:
             image_indices = image_indices[-num_tokens:]
             
-        # DEBUG: Analyze Gradient Flow in Last Layer to find True Target
-        last_name = sorted_keys[-1]
-        last_attn = lm_maps[last_name].float()
-        last_grad = grad_maps.get(last_name, torch.zeros_like(last_attn)).float()
-        
-        # Check which tokens (Queries) have non-zero gradients
-        # grad is [B, H, S, S]. We average over B, H, and Key(S) to see which Query(S) is active.
-        query_grad_mag = last_grad.abs().mean(dim=(0, 1, 3)) # [S]
-        
-        # Dynamically select target index based on max gradient
-        target_idx = torch.argmax(query_grad_mag).item()
+        # Match baseline: Use the last token as the target
+        target_idx = -1
         
         # Extract scores
         num_tokens = meta.get("num_image_tokens_per_patch", 256)
-        
-        if len(image_indices) > num_tokens:
-            # Use Tile tokens for High-Res Heatmap (Exclude Global View at the end)
-            image_indices = image_indices[:-num_tokens]
-            print(f"[Ours] Using {len(image_indices)} Tile tokens for High-Res Heatmap.")
-        else:
-            # Only Global View exists
-            pass
+        # Note: We use all tokens (Tiles + Global) as per latest fix
             
         scores = R[0, target_idx, image_indices] # [Num_Image_Tokens]
         
