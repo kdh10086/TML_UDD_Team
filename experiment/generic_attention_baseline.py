@@ -496,6 +496,10 @@ class GenericAttentionTextVisualizer:
             grad_list = [entry["grad"] for entry in entries if entry.get("grad") is not None]
             if not attn_list or not grad_list:
                 continue
+            # 토큰 길이가 미묘하게 다를 수 있어 스택 전에 최소 길이에 맞춰 자릅니다.
+            min_len = min(t.shape[-1] for t in attn_list)
+            attn_list = [t[..., :min_len, :min_len] for t in attn_list]
+            grad_list = [g[..., :min_len, :min_len] for g in grad_list]
             attn = torch.stack(attn_list, dim=0).mean(dim=0)
             grad = torch.stack(grad_list, dim=0).mean(dim=0)
             cam = avg_heads(attn, grad)
