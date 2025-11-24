@@ -579,6 +579,7 @@ class SimLingoInferenceBaseline:
         self.spline_num_samples = spline_num_samples if spline_num_samples and spline_num_samples > 0 else None
         
         self.debug_info = {}  # Store debug info for .pt file
+        self.debug = False # Initialize debug flag
 
         # ViT/LLM 모두 어텐션을 수집 (기본 켜짐)
         if enable_vision_hooks is None:
