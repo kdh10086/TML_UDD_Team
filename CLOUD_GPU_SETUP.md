@@ -222,18 +222,18 @@ python -m experiment.vit_raw_attention \
 ```bash
 # 텍스트 모드 Generic (캐시 전용)
  python -m experiment.generic_attention_baseline \
-  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_text_max_XXXX \
-  --output_dir experiment_outputs/generic_text \
-  --scene_dir data/sample_scene \
-  --text_token_strategy max --text_token_index -1 \
-  --colormap JET --alpha 0.5
+  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_text_max_251124_1416 \
+  --output_dir experiment_outputs/generic_attention \
+  --text_token_strategy max \
+  --colormap JET \
+  --alpha 0.5
 
 # 액션 모드 Generic (캐시 전용, ours.py)
  python -m experiment.ours \
-  --payload_root experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1225 \
+  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
   --output_dir experiment_outputs/ours \
-  --scene_dir data/sample_small/01 \
-  --colormap JET --alpha 0.5
+  --colormap JET \
+  --alpha 0.5
 ```
 - `--payload_root`는 필수이며, 모델을 다시 돌리지 않습니다.
 
@@ -258,7 +258,7 @@ cd /mnt/data1/
 #샘플 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/1CfmRcnSZepCG0k9J4n5lkQZXd_tTxr7B/view?usp=drive_link' -O new_sample_dataset.zip
 #DREYEVE_DATA_filtered 데이터셋
-gdown --fuzzy 'https://drive.google.com/file/d/1-VgGkHAf5WNOCEISZXjNazaaEn3vE9r0/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
+gdown --fuzzy 'https://drive.google.com/file/d/16WOxAYcr6TONqOBDwvX40uoXVzK18Bmw/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
 #샘플 작은 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/1KgWRInvxE9hTf_hKMo58-fzZOAGIsaP5/view?usp=sharing' -O sample_small.zip
 
