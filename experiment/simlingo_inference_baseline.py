@@ -898,24 +898,8 @@ class SimLingoInferenceBaseline:
         if not self.skip_backward:
             if target_scalar is None:
                 raise RuntimeError("Target scalar could not be computed for relevance backprop.")
-            # Pass 1 Backward (Optional, usually broken for autoregressive)
-            # target_scalar.backward(retain_graph=False)
+            target_scalar.backward(retain_graph=False)
 
-        # Pass 2: Teacher Forcing Re-run for Gradients
-        # We use the generated text (or action) to construct a full sequence input
-        # and run a single forward pass to get connected gradients.
-        generated_text = text_features.get("decoded_text", "") if text_features else ""
-        
-        # Start recording for the gradient pass
-        self.recorder.start_recording(record_tag)
-        
-        tf_target_scalar, tf_meta = self._run_teacher_forcing_pass(
-            image_path, current_speed, generated_text, outputs
-        )
-        
-        if not self.skip_backward and tf_target_scalar is not None:
-            tf_target_scalar.backward()
-        
         attention_maps = self.recorder.stop_recording()
         # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
         # DrivingModel이 attentions를 반환하지 않으므로, InternVLChatModel에 stash된 값을 가져옵니다.
@@ -994,17 +978,13 @@ class SimLingoInferenceBaseline:
 
         if not self.skip_backward:
             self.model.zero_grad(set_to_none=True)
-        
-        # Update target_info with TF meta if available (it might have better details)
-        if tf_meta:
-            target_meta.update(tf_meta)
 
         payload = {
             "tag": record_tag,
             "image_path": str(image_path),
             "input_speed_mps": current_speed,
             "meta": meta,
-            "target_scalar": tf_target_scalar.detach().to("cpu") if tf_target_scalar is not None else None,
+            "target_scalar": target_scalar.detach().to("cpu") if target_scalar is not None else None,
             "target_info": target_meta,
             "outputs": self._serialize_outputs(outputs),
             "text_outputs": self._serialize_text_outputs(text_features),
@@ -1048,8 +1028,6 @@ class SimLingoInferenceBaseline:
         del outputs, payload, attention_maps, text_features, driving_input
         if not self.skip_backward:
             del target_scalar
-            if tf_target_scalar is not None:
-                del tf_target_scalar
         
         # Force GC and empty cache
         import gc
@@ -1103,39 +1081,26 @@ class SimLingoInferenceBaseline:
         
         self.run_batch(image_paths, output_dir, scene_dir)
 
-    def _run_teacher_forcing_pass(
+    def _prepare_driving_input(
         self,
         image_path: Path,
-        current_speed: float,
-        generated_text: str,
-        original_outputs,
-    ) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
-        """
-        Teacher forcing 모드로 모델을 다시 실행하여 그래디언트를 계산합니다.
-        생성된 텍스트 또는 원래 예측된 행동을 사용하여 입력 시퀀스를 구성합니다.
-        """
-        # 텍스트 모드인 경우, 생성된 텍스트를 assistant_response로 사용하여 입력 구성
-        if self.explain_mode == "text":
-            driving_input, _ = self._prepare_driving_input(
-                image_path, current_speed=current_speed, append_response=generated_text
-            )
-            tf_outputs = self.model(driving_input)
-            tf_text_features = self._gather_text_features()
-            tf_target_scalar, tf_meta = self._compute_target_scalar(tf_outputs, tf_text_features)
-            return tf_target_scalar, tf_meta
-        
-        # 행동 모드인 경우, 원래 예측된 행동을 사용하여 입력 구성 (현재는 지원하지 않음)
-        # TODO: 행동 모드에 대한 teacher forcing 구현 (예: pred_route를 target_point로 사용)
-        # 현재는 행동 모드에서 teacher forcing을 사용하지 않고 원래 출력을 반환
-        tf_target_scalar, tf_meta = self._compute_target_scalar(original_outputs, None)
-        return tf_target_scalar, tf_meta
-
-    def _prepare_driving_input(
-        self, image_path: Path, current_speed: float = 0.0, append_response: str = ""
+        current_speed: float = 0.0,
+        append_response: str = "",
+        target_points: Optional[torch.Tensor] = None,
     ) -> Tuple[DrivingInput, Dict[str, Any]]:
         """단일 이미지를 전처리하여 DrivingInput과 메타 정보를 생성합니다."""
         processed_image, num_patches, orig_hw = self._preprocess_image(image_path)
         placeholder_batch_list: List[dict] = []
+        target_point_tensor = torch.zeros(1, 2, dtype=torch.float32, device=self.device)
+
+        if target_points is not None and target_points.numel() > 0:
+            tp = target_points.detach()
+            if tp.dim() == 2:
+                tp = tp.unsqueeze(0)
+            tp = tp.to(device=self.device, dtype=torch.float32)
+            target_point_tensor = tp[:, 0, :2]
+            token_id = self.tokenizer.convert_tokens_to_ids("<TARGET_POINT>")
+            placeholder_batch_list.append({token_id: tp[0, :, :2].to("cpu").numpy()})
         prompt_str = (
             f"Current speed: {current_speed:.1f} m/s. What should the ego vehicle do next? Provide a short commentary."
         )
@@ -1156,7 +1121,7 @@ class SimLingoInferenceBaseline:
             camera_intrinsics=camera_intrinsics.to(self.device),
             camera_extrinsics=camera_extrinsics.to(self.device),
             vehicle_speed=torch.tensor([[current_speed]], dtype=torch.float32, device=self.device),
-            target_point=torch.zeros(1, 2, dtype=torch.float32, device=self.device),
+            target_point=target_point_tensor,
             prompt=lang_label,
             prompt_inference=lang_label,
         )
@@ -1369,9 +1334,23 @@ class SimLingoInferenceBaseline:
         self, image_path: Path, current_speed: float, generated_text: str, original_outputs
     ) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
         """Generated text를 포함한 입력을 구성해 Teacher Forcing으로 그래디언트를 계산합니다."""
+        target_points = None
+        tf_response = generated_text
+        if self.explain_mode == "action":
+            _, pred_route, _ = original_outputs
+            if pred_route is not None and pred_route.numel() > 0:
+                tp = pred_route.detach()
+                if tp.dim() == 2:
+                    tp = tp.unsqueeze(0)
+                coords = tp[..., :2]
+                coords_count = min(coords.shape[1], 2)
+                if coords_count > 0:
+                    target_points = coords[:, :coords_count]
+                    tf_response = "<TARGET_POINT>" * coords_count
+
         # 1. Re-build input with full text
         tf_input, _ = self._prepare_driving_input(
-            image_path, current_speed, append_response=generated_text
+            image_path, current_speed, append_response=tf_response, target_points=target_points
         )
         
         # 2. Get adaptors (inference=True to prepare embeddings, but we use them for TF)
@@ -1405,7 +1384,7 @@ class SimLingoInferenceBaseline:
             # Reconstruct outputs tuple for _compute_action_target
             # (pred_speed_wps, pred_route, language)
             # We only care about action here.
-            pred_speed_wps = predictions.get("waypoints")
+            pred_speed_wps = predictions.get("speed_wps")
             pred_route = predictions.get("route")
             
             # Use the newly computed action predictions for target calculation
