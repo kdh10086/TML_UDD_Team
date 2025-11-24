@@ -13,6 +13,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from omegaconf import OmegaConf
+from transformers import AutoProcessor
 
 from experiment.overlay_utils import overlay_trajectories, resolve_overlay_dirs
 from experiment.simlingo_inference_baseline import DEFAULT_CONFIG_PATH, DEFAULT_OUTPUT_DIR
