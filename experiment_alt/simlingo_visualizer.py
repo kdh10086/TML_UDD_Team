@@ -386,9 +386,9 @@ class SimLingoVisualizer:
         # 1. Vision Encoder Hooks (for All methods)
         vision_model = self.model.vision_model.image_encoder.model.vision_model
         for i, layer in enumerate(vision_model.encoder.layers):
-            if hasattr(layer, "attn"): target = layer.attn
-            elif hasattr(layer, "attention"): target = layer.attention
-            else: continue
+            # Hook the Layer/Block itself, not the attention submodule.
+            # Standard HF layers return (hidden_states, attentions) if output_attentions=True.
+            target = layer
             
             # Generic needs grad, others don't (but we capture grad if we run generic)
             save_grad = (method in ["generic", "all", "ours"])
@@ -399,10 +399,8 @@ class SimLingoVisualizer:
             lm = self.model.language_model.model
             layers = getattr(lm, "layers", getattr(getattr(lm, "model", None), "layers", []))
             for i, layer in enumerate(layers):
-                # InternLM2 attention is usually in layer.self_attn
-                if hasattr(layer, "self_attn"): target = layer.self_attn
-                elif hasattr(layer, "attention"): target = layer.attention
-                else: continue
+                # Hook the Layer/Block itself
+                target = layer
                 
                 self.hooks.append(target.register_forward_hook(get_hook(f"language_layer_{i}", save_grad=True)))
 
