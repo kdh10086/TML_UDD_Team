@@ -230,9 +230,9 @@ python -m experiment.vit_raw_attention \
 
 # 액션 모드 Generic (캐시 전용, ours.py)
  python -m experiment.ours \
-  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --output_dir experiment_outputs/generic_action \
-  --scene_dir data/sample_scene \
+  --payload_root experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1225 \
+  --output_dir experiment_outputs/ours \
+  --scene_dir data/sample_small/01 \
   --colormap JET --alpha 0.5
 ```
 - `--payload_root`는 필수이며, 모델을 다시 돌리지 않습니다.

@@ -110,6 +110,7 @@ class VisionAttentionRollout:
         if scene_dir is not None:
             candidates = []
             scene_dir = Path(scene_dir)
+            candidates.append(scene_dir / "video_garmin" / f"{payload['tag']}.png")
             candidates.append(scene_dir / "images" / f"{payload['tag']}.png")
             candidates.append(scene_dir / f"{payload['tag']}.png")
             for c in candidates:

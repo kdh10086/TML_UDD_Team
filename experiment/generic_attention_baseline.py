@@ -103,8 +103,17 @@ class GenericAttentionTextVisualizer:
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
         scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
-        images_dir = scene_dir / "images"
-        image_root = images_dir if images_dir.exists() else scene_dir
+        
+        # Robust image directory search
+        candidates = [scene_dir / "video_garmin", scene_dir / "images", scene_dir]
+        image_root = scene_dir
+        for cand in candidates:
+            if cand.exists() and cand.is_dir():
+                # Check if it has images
+                if any(p.suffix.lower() in {".png", ".jpg", ".jpeg"} for p in cand.iterdir()):
+                    image_root = cand
+                    break
+        
         image_paths = sorted(
             [p for p in image_root.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
