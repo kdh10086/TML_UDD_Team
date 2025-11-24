@@ -354,6 +354,41 @@ class SimLingoVisualizer:
                  
         return hook
 
+    def _find_layers(self, module):
+        # Robustly find the transformer layer list using BFS
+        queue = [(module, 0)]
+        visited = set()
+        
+        while queue:
+            curr, depth = queue.pop(0)
+            if depth > 4: continue
+            if curr in visited: continue
+            visited.add(curr)
+            
+            # Check for common layer list names
+            for name in ["layers", "h", "blocks", "block"]:
+                if hasattr(curr, name):
+                    attr = getattr(curr, name)
+                    if isinstance(attr, torch.nn.ModuleList):
+                        return attr
+            
+            # Recurse into children (bfs)
+            # Prioritize 'model', 'base_model', 'transformer' attributes
+            for name in ["model", "base_model", "transformer", "backbone"]:
+                if hasattr(curr, name):
+                    child = getattr(curr, name)
+                    if isinstance(child, torch.nn.Module):
+                        queue.append((child, depth + 1))
+                        
+            # Also check all children if specific names not found (slower but safer)
+            # But limit to immediate children to avoid explosion
+            if depth < 2:
+                for name, child in curr.named_children():
+                    if isinstance(child, torch.nn.Module):
+                        queue.append((child, depth + 1))
+                        
+        return None
+
     def _register_hooks(self, method="all"):
         self.hooks = []
         self.attn_maps = {}
@@ -381,20 +416,18 @@ class SimLingoVisualizer:
 
         # Register hooks for Language Model (only if needed)
         if method in ["generic", "all", "ours"]:
-            lm = self.model.language_model
-            if hasattr(lm, 'model'): # Handle PeftModel or similar wrappers
-                lm = lm.model
-                
-            llm_layers = None
-            if hasattr(lm, 'model') and hasattr(lm.model, 'layers'): # Qwen2ForCausalLM -> Qwen2Model -> layers
-                llm_layers = lm.model.layers
-            elif hasattr(lm, 'layers'): # Direct access to layers
-                llm_layers = lm.layers
+            llm_layers = self._find_layers(self.model.language_model)
             
             if llm_layers is None:
-                print("WARNING: Could not find LLM layers for hooking.")
-                return
+                print(f"WARNING: Could not find LLM layers for hooking. Model Type: {type(self.model.language_model)}")
+                # Try one last hardcoded fallback for Qwen2
+                try:
+                    llm_layers = self.model.language_model.model.model.layers
+                    print("DEBUG: Found layers via hardcoded fallback.")
+                except:
+                    return
 
+            print(f"DEBUG: Found {len(llm_layers)} LLM layers.")
             for i, layer in enumerate(llm_layers):
                 # For LLM layers, hooking the layer directly is often sufficient if output_attentions=True
                 # as the attention weights will be part of the layer's output tuple.
