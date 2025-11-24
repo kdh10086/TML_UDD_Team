@@ -74,18 +74,9 @@ def _install_extract_feature_patch(auto_model) -> None:
         return
 
     def _patched(self, pixel_values, **kwargs):
-        # First try the original extract_feature with attentions enabled (preserves internals like image_flags)
-        try:
-            return orig(pixel_values, output_attentions=True, return_dict=True, **kwargs)
-        except Exception:
-            outputs = self.forward(pixel_values, output_attentions=True, return_dict=True, **kwargs)
-            if hasattr(outputs, "last_hidden_state"):
-                return outputs.last_hidden_state
-            if isinstance(outputs, dict) and "last_hidden_state" in outputs:
-                return outputs["last_hidden_state"]
-            if isinstance(outputs, (list, tuple)) and len(outputs) > 0:
-                return outputs[0]
-            return outputs
+        # Use original extract_feature to preserve internal kwargs (image_flags etc.).
+        # Rely on model.config.output_attentions=True set upstream.
+        return orig(pixel_values, **kwargs)
 
     auto_model.extract_feature = types.MethodType(_patched, auto_model)
 
