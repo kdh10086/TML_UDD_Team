@@ -1073,6 +1073,9 @@ class SimLingoInferenceBaseline:
         lang_label = self._build_language_label(
             prompt_str, placeholder_batch_list, num_patches, assistant_response=append_response
         )
+        print(f"[DEBUG] _prepare_driving_input: append_response='{append_response}'")
+        print(f"[DEBUG] _prepare_driving_input: lang_label.phrase_ids.shape={lang_label.phrase_ids.shape}")
+        
         camera_intrinsics = get_camera_intrinsics(orig_hw[1], orig_hw[0], 110).unsqueeze(0).unsqueeze(0)
         camera_extrinsics = get_camera_extrinsics().unsqueeze(0).unsqueeze(0)
         driving_input = DrivingInput(
