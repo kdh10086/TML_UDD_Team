@@ -389,6 +389,16 @@ class SimLingoVisualizer:
             if target.requires_grad:
                 self.model.zero_grad()
                 target.backward()
+                
+                # Debug: Check if gradients are flowing
+                print(f"Target Value: {target.item():.6f}, Requires Grad: {target.requires_grad}")
+                if self.grad_maps:
+                    first_key = list(self.grad_maps.keys())[0]
+                    last_key = list(self.grad_maps.keys())[-1]
+                    print(f"Grad Map [{first_key}] Mean: {self.grad_maps[first_key].float().mean():.6e}, Max: {self.grad_maps[first_key].max():.6e}")
+                    print(f"Grad Map [{last_key}] Mean: {self.grad_maps[last_key].float().mean():.6e}, Max: {self.grad_maps[last_key].max():.6e}")
+                else:
+                    print("WARNING: No gradients captured in grad_maps!")
         
         # Generate Visualizations
         for method in methods:
