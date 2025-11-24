@@ -79,9 +79,10 @@ class InternVLChatModel(PreTrainedModel):
         self.num_image_token = int((image_size // patch_size) ** 2 * (config.downsample_ratio ** 2))
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
-        use_flash_attn = use_flash_attn if has_flash_attn else False
-        config.vision_config.use_flash_attn = True if use_flash_attn else False
-        config.llm_config._attn_implementation = 'flash_attention_2' if use_flash_attn else 'eager'
+        # 어텐션 맵/grad를 얻기 위해 flash attn 비활성화 + eager 강제
+        use_flash_attn = False
+        config.vision_config.use_flash_attn = False
+        config.llm_config._attn_implementation = 'eager'
 
         logger.info(f'num_image_token: {self.num_image_token}')
         logger.info(f'ps_version: {self.ps_version}')
