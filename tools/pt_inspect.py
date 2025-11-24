@@ -21,20 +21,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--depth",
         type=int,
-        default=3,
-        help="How deep to recurse into nested structures (default: 3)",
+        default=8,
+        help="How deep to recurse into nested structures (default: 8)",
     )
     parser.add_argument(
         "--items",
         type=int,
-        default=15,
-        help="Max mapping entries to show per level (default: 15)",
+        default=200,
+        help="Max mapping entries to show per level (default: 200)",
     )
     parser.add_argument(
         "--list-items",
         type=int,
-        default=10,
-        help="Max sequence items to show per level (default: 10)",
+        default=200,
+        help="Max sequence items to show per level (default: 200)",
     )
     return parser.parse_args()
 
@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
 def format_tensor(tensor: torch.Tensor) -> str:
     shape = tuple(tensor.shape)
     return f"Tensor shape={shape} dtype={tensor.dtype}"
+
+
+def _format_entry(obj) -> str:
+    if isinstance(obj, torch.Tensor):
+        return f"tensor shape={tuple(obj.shape)} dtype={obj.dtype}"
+    return f"{type(obj).__name__}"
 
 
 def _maybe_len(obj) -> str:
@@ -141,20 +147,18 @@ def describe_simlingo_payload(payload) -> None:
 
     attention = payload.get("attention") or {}
     if attention:
-        print("- 어텐션 맵: 블록별 스택 요약")
+        print("- 어텐션 맵 상세")
         for name in sorted(attention):
             stack = attention[name] or []
-            if not stack:
-                continue
-            first = stack[0]
-            shape = first.get("shape")
-            grad = first.get("grad") is not None
-            attn_tensor = first.get("attn")
-            if shape is None and isinstance(attn_tensor, torch.Tensor):
-                shape = tuple(attn_tensor.shape)
-            print(
-                f"  · {name}: {len(stack)}개, attn shape={shape}, grad={'있음' if grad else '없음'}"
-            )
+            print(f"  · {name}: {len(stack)}개")
+            for idx, entry in enumerate(stack):
+                attn_tensor = entry.get("attn")
+                grad_tensor = entry.get("grad")
+                shape = entry.get("shape")
+                if shape is None and isinstance(attn_tensor, torch.Tensor):
+                    shape = tuple(attn_tensor.shape)
+                grad_info = "있음" if grad_tensor is not None else "없음"
+                print(f"    [{idx}] attn_shape={shape} grad={grad_info}")
 
     print("")  # spacer
 
