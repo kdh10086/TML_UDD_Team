@@ -826,10 +826,10 @@ class SimLingoVisualizer:
 
         first_map = vision_maps[sorted_keys[0]]
         B, H, S, S = first_map.shape
-        R = torch.eye(S, device=self.device).unsqueeze(0).expand(B, S, S)
+        R = torch.eye(S, device=self.device, dtype=torch.float32).unsqueeze(0).expand(B, S, S)
         
         for name in sorted_keys:
-            attn = vision_maps[name]
+            attn = vision_maps[name].float()
             attn_mean = attn.mean(dim=1) # [B, S, S]
             attn_mean = attn_mean + torch.eye(S, device=self.device).unsqueeze(0)
             attn_mean = attn_mean / attn_mean.sum(dim=-1, keepdim=True)
@@ -847,10 +847,10 @@ class SimLingoVisualizer:
 
         first_map = vision_maps[sorted_keys[0]]
         B, H, S, S = first_map.shape
-        R = torch.eye(S, device=self.device).unsqueeze(0).expand(B, S, S)
+        R = torch.eye(S, device=self.device, dtype=torch.float32).unsqueeze(0).expand(B, S, S)
         
         for name in sorted_keys:
-            attn = vision_maps[name]
+            attn = vision_maps[name].float()
             attn_mean = attn.mean(dim=1) # [B, S, S]
             # No residual connection for pure flow usually, but let's check standard impl.
             # Often it's just chain multiplication.
@@ -867,7 +867,7 @@ class SimLingoVisualizer:
         if not sorted_keys: return torch.zeros(1)
 
         last_name = sorted_keys[-1]
-        attn = vision_maps[last_name]
+        attn = vision_maps[last_name].float()
         # FIX: Aggregate all patches
         if attn.shape[2] <= 1: return torch.zeros(1) # Ensure there are patches beyond CLS token
         return attn.mean(dim=1)[-1, 1:, 1:].sum(dim=0)
