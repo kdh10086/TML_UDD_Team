@@ -171,6 +171,31 @@ class InternVLChatModel(PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        # 강제로 전 레이어 어텐션을 노출하고 grad를 유지
+        attn_list = []
+        if outputs.attentions:
+            for attn in outputs.attentions:
+                if attn is None:
+                    continue
+                try:
+                    attn.retain_grad()
+                except Exception:
+                    pass
+                attn_list.append(attn)
+        else:
+            lm = getattr(self.language_model, "model", None)
+            if lm is not None and hasattr(lm, "layers"):
+                for layer in lm.layers:
+                    attn = getattr(layer.self_attn, "attn_map", None)
+                    if attn is None:
+                        continue
+                    try:
+                        attn.retain_grad()
+                    except Exception:
+                        pass
+                    attn_list.append(attn)
+        if attn_list:
+            outputs.attentions = tuple(attn_list)
         logits = outputs.logits
 
         loss = None
