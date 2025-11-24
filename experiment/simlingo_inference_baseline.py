@@ -677,12 +677,19 @@ class SimLingoInferenceBaseline:
             lm = self.model.language_model.model
             # top-level CausalLM/LLM module (captures BaseModelOutput.attentions if provided)
             self.recorder.register_module(lm, "language_model_top", record_grad=True)
-            if hasattr(lm, "model") and hasattr(lm.model, "layers"):
-                layers = lm.model.layers
-            elif hasattr(lm, "layers"):
+            
+            layers = []
+            if hasattr(lm, "layers"):
                 layers = lm.layers
-            else:
-                layers = []
+            elif hasattr(lm, "model") and hasattr(lm.model, "layers"):
+                layers = lm.model.layers
+            elif hasattr(lm, "h"): # Common in some models
+                layers = lm.h
+            elif hasattr(lm, "block"): # Common in others
+                layers = lm.block
+            
+            # print(f"[DEBUG] Found {len(layers)} LLM layers for hooking")
+            
             for idx, block in enumerate(layers):
                 self.recorder.register_module(block, f"language_block_{idx}", record_grad=True)
                 # register inner attention modules explicitly
