@@ -331,14 +331,24 @@ class SimLingoVisualizer:
 
         def get_hook(name, save_grad=False):
             def hook(module, input, output):
-                # Debug: Inspect output structure for the first layer
-                if "layer_0" in name and "vision" in name:
-                    # Print Module Structure to find inner attention
-                    # print(f"DEBUG: Hook {name} Module Type: {type(module)}")
+                # Debug: Inspect output structure for the first layer (Vision)
+                if "vision_layer_0" in name:
                     pass
-                        
-                    # print(f"DEBUG: Hook {name} Output Type: {type(output)}")
                 
+                # Debug: Inspect output structure for the first LLM layer
+                if "language_layer_0" in name:
+                    print(f"DEBUG: Hook {name} Module Type: {type(module)}")
+                    print(f"DEBUG: Hook {name} Output Type: {type(output)}")
+                    if isinstance(output, torch.Tensor):
+                        print(f"DEBUG: Hook {name} Output Shape: {output.shape}")
+                    elif isinstance(output, tuple):
+                        print(f"DEBUG: Hook {name} Output Tuple Len: {len(output)}")
+                        for idx, item in enumerate(output):
+                             if hasattr(item, "shape"):
+                                print(f"  - Item {idx} Shape: {item.shape}")
+                             else:
+                                print(f"  - Item {idx} Type: {type(item)}")
+
                 # Try to extract attn
                 attn = None
                 context = None
@@ -359,17 +369,17 @@ class SimLingoVisualizer:
                 # Debug: Check context gradients (Layer Output)
                 if save_grad and hasattr(context, "requires_grad") and context is not None and context.requires_grad:
                     def context_grad_hook(grad):
-                        if "layer_0" in name and "vision" in name:
+                        if ("vision_layer_0" in name) or ("language_layer_0" in name):
                             print(f"DEBUG: Hook {name} Context (Output) Grad Mean: {grad.float().mean():.6e}")
                     context.register_hook(context_grad_hook)
 
                 if attn is None: 
-                    if "layer_0" in name and "vision" in name:
+                    if ("vision_layer_0" in name) or ("language_layer_0" in name):
                         print(f"DEBUG: Hook {name} - Attn is None! Output shape: {output.shape if hasattr(output, 'shape') else 'N/A'}")
                     return
 
                 # Debug: Check if attn is attached to graph
-                if "layer_0" in name and "vision" in name:
+                if ("vision_layer_0" in name) or ("language_layer_0" in name):
                      print(f"Hook {name} captured attn. Shape: {attn.shape}, Requires Grad: {attn.requires_grad}")
 
                 self.attn_maps[name] = attn.detach()
@@ -378,11 +388,11 @@ class SimLingoVisualizer:
                     if attn.requires_grad:
                         def grad_hook(grad):
                             self.grad_maps[name] = grad.detach()
-                            if "layer_0" in name and "vision" in name:
+                            if ("vision_layer_0" in name) or ("language_layer_0" in name):
                                 print(f"DEBUG: Hook {name} Attn Grad Mean: {grad.float().mean():.6e}")
                         attn.register_hook(grad_hook)
                     else:
-                        if "layer_0" in name and "vision" in name:
+                        if ("vision_layer_0" in name) or ("language_layer_0" in name):
                             print(f"WARNING: Hook {name} cannot register grad hook because attn.requires_grad is False")
             return hook
 
