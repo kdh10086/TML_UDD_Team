@@ -54,7 +54,7 @@ def main():
     # 1. Run Inference (Action Mode)
     print("\n[Pipeline] Step 1: Running Inference (Action Mode)...")
     cmd_action = [
-        sys.executable, "experiment/simlingo_inference_baseline.py",
+        sys.executable, "-m", "experiment.simlingo_inference_baseline",
         "--scene_dir", str(scenario_path),
         "--output_dir", str(temp_action_dir),
         "--target_mode", "auto",
@@ -68,7 +68,7 @@ def main():
     # 2. Run Inference (Text Mode)
     print("\n[Pipeline] Step 2: Running Inference (Text Mode)...")
     cmd_text = [
-        sys.executable, "experiment/simlingo_inference_baseline.py",
+        sys.executable, "-m", "experiment.simlingo_inference_baseline",
         "--scene_dir", str(scenario_path),
         "--output_dir", str(temp_text_dir),
         "--target_mode", "auto",
