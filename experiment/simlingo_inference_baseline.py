@@ -46,17 +46,25 @@ _orig_qwen2_attn_forward = Qwen2Attention.forward
 
 
 def _patched_qwen2_attn_forward(self, *args, **kwargs):
-    output_attentions = kwargs.get("output_attentions", False) or True
-    kwargs["output_attentions"] = output_attentions
-    hidden_states, attn_weights, past_key_value = _orig_qwen2_attn_forward(self, *args, **kwargs)
-    # attn_weights: [batch, heads, tgt_len, src_len]
+    kwargs["output_attentions"] = True
+    result = _orig_qwen2_attn_forward(self, *args, **kwargs)
+    attn_weights = None
+    if isinstance(result, tuple):
+        if len(result) >= 3:
+            attn_weights = result[1]
+        elif len(result) >= 2:
+            attn_weights = result[1]
+    # attn_weights shape: [batch, heads, tgt_len, src_len]
     self.attn_map = attn_weights
-    if attn_weights is not None:
-        attn_weights.retain_grad()
+    if attn_weights is not None and torch.is_tensor(attn_weights):
+        try:
+            attn_weights.retain_grad()
+        except Exception:
+            pass
         self.attn_map_grad = attn_weights.grad
     else:
         self.attn_map_grad = None
-    return hidden_states, attn_weights, past_key_value
+    return result
 
 
 Qwen2Attention.forward = _patched_qwen2_attn_forward
@@ -616,7 +624,7 @@ class SimLingoInferenceBaseline:
                 # attention submodules directly (to force per-layer attn capture)
                 for sub_name, sub_module in vision_model.named_modules():
                     cls = sub_module.__class__.__name__.lower()
-                    if "attention" in cls:
+                    if "attention" in cls or "attn" in sub_name.lower():
                         safe_name = sub_name.replace(".", "_")
                         self.recorder.register_module(sub_module, f"vision_attn_{safe_name}", record_grad=False)
         # 언어 모델 블록 훅 등록
@@ -635,7 +643,7 @@ class SimLingoInferenceBaseline:
                 # register inner attention modules explicitly
                 for sub_name, sub_module in block.named_modules():
                     cls = sub_module.__class__.__name__.lower()
-                    if "attention" in cls:
+                    if "attention" in cls or "attn" in sub_name.lower():
                         safe_name = f"language_block_{idx}_" + sub_name.replace(".", "_")
                         self.recorder.register_module(sub_module, safe_name, record_grad=True)
 
