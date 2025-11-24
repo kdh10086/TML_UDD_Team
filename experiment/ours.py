@@ -93,7 +93,9 @@ class GenericAttentionActionVisualizer:
         scene_dir: Path,
         output_dir: Path,
         suffix: str = "generic_action",
+        suffix: str = "generic_action",
         raw_output_dir: Optional[Path] = None,
+        target_files: Optional[List[Path]] = None,
     ) -> None:
         """scene_dir 내 pt 파일들에 대해 히트맵을 생성하고 저장한다."""
         scene_dir = Path(scene_dir)
@@ -138,15 +140,46 @@ class GenericAttentionActionVisualizer:
             print(f"[DEBUG] Checking candidate: {cand}")
             if cand.exists() and cand.is_dir():
                 # Check if it has images
-                has_images = False
-                for p in cand.iterdir():
-                    if p.suffix.lower() in {".png", ".jpg", ".jpeg"}:
-                        has_images = True
-                        break
-                print(f"[DEBUG] Candidate {cand} exists. Has images? {has_images}")
-                if has_images:
-                    image_root = cand
-                    break
+                if target_files:
+                    # If target_files provided, use them directly (assuming they are image paths)
+                    # We need to ensure they are Path objects
+                    image_paths = [Path(p) for p in target_files]
+                else:
+                    image_paths = sorted(
+                        [p for p in cand.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+                    )
+                
+                if not self._payload_index:
+                    # If no payload index (maybe payload_root was not set in init), try to resolve it now
+                    # But we need payload_root to index.
+                    # If explicit_payload_root is set, we index it.
+                    if self.explicit_payload_root:
+                        self.payload_root = self._resolve_payload_root(self.explicit_payload_root, self.trajectory_overlay_root)
+                        self._payload_index = self._index_payloads(self.payload_root)
+                    elif scene_dir:
+                        # Try to derive
+                        candidates = [scene_dir / "pt", scene_dir]
+                        for c in candidates:
+                            if c.exists() and any(c.glob("*.pt")):
+                                self.payload_root = c
+                                self._payload_index = self._index_payloads(self.payload_root)
+                                break
+                
+                if not self._payload_index:
+                    raise RuntimeError("No payloads found. Please provide payload_root or ensure pt files exist in scene_dir/pt")
+
+                for image_path in tqdm(image_paths, desc=f"GenericAction ({scene_dir.name})", unit="img"):
+                    # Find corresponding payload for the image
+                    tag = image_path.stem
+                    pt_path = self._payload_index.get(tag)
+                    if pt_path is None:
+                        print(f"Warning: Payload not found for image {image_path.name}. Skipping.")
+                        continue
+
+                    self._process_single_image(
+                        image_path, pt_path, scenario_output_dir, suffix, route_dir, speed_dir, scenario_raw_output_dir
+                    )
+                return # Exit after processing images from the first valid image_root
             else:
                 print(f"[DEBUG] Candidate {cand} does not exist or is not a directory.")
         

@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Integrated Execution Pipeline for Sim-Lingo.
-Runs inference (Action & Text modes) and 5 visualization methods,
-organizing outputs into a structured directory hierarchy.
+Integrated Execution Pipeline for Sim-Lingo (Batch Processing).
+Runs inference (Action & Text modes) and 5 visualization methods in batches of 100 frames.
 """
 
 import argparse
 import datetime
 import shutil
-import subprocess
 import sys
+import gc
 from pathlib import Path
-from typing import Optional
+from typing import List, Dict, Any
+import torch
+from tqdm import tqdm
 
-# Import visualization runners
+# Import runners directly
+from experiment.simlingo_inference_baseline import SimLingoInferenceBaseline
 from experiment.ours import GenericAttentionActionVisualizer
 from experiment.generic_attention_baseline import GenericAttentionTextVisualizer
 from experiment.vit_attention_rollout import VisionAttentionRollout
@@ -21,17 +23,28 @@ from experiment.vit_attention_flow import VisionAttentionFlow
 from experiment.vit_raw_attention import VisionRawAttention
 
 
-def run_command(cmd: list[str], cwd: Optional[Path] = None) -> None:
-    print(f"[Pipeline] Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, check=False)
-    if result.returncode != 0:
-        print(f"[Pipeline] Command failed with return code {result.returncode}")
-        sys.exit(result.returncode)
+def get_image_paths(scene_dir: Path, frames_subdir: str = "video_garmin") -> List[Path]:
+    # Try frames subdir first
+    candidate = scene_dir / frames_subdir
+    if not candidate.exists():
+        candidate = scene_dir / "images"
+    
+    if not candidate.exists():
+        raise FileNotFoundError(f"No images found in {scene_dir} (checked {frames_subdir} and images)")
+        
+    return sorted([p for p in candidate.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+
+
+def chunk_list(data: List[Any], chunk_size: int):
+    for i in range(0, len(data), chunk_size):
+        yield data[i : i + chunk_size]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sim-Lingo Integrated Pipeline")
-    parser.add_argument("scenario_path", type=Path, help="Path to the scenario directory (e.g., data/sample_small/01)")
+    parser = argparse.ArgumentParser(description="Sim-Lingo Integrated Pipeline (Batch)")
+    parser.add_argument("scenario_path", type=Path, help="Path to the scenario directory")
+    parser.add_argument("--batch_size", type=int, default=100, help="Number of frames per batch")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     args = parser.parse_args()
 
     scenario_path = args.scenario_path.resolve()
@@ -44,213 +57,198 @@ def main():
     base_output_dir = Path("experiment_outputs/integrated") / f"{scenario_name}_{timestamp}"
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[Pipeline] Starting integrated pipeline for {scenario_name}")
+    print(f"[Pipeline] Starting batch pipeline for {scenario_name}")
     print(f"[Pipeline] Output directory: {base_output_dir}")
 
-    # Define temporary directories for inference outputs
-    temp_action_dir = base_output_dir / "temp_inference_action"
-    temp_text_dir = base_output_dir / "temp_inference_text"
+    # 1. Initialize Inference Runner (Shared)
+    # We will toggle explain_mode between 'action' and 'text'
+    print("[Pipeline] Initializing Inference Model...")
+    inference_runner = SimLingoInferenceBaseline(
+        device=args.device,
+        target_mode="auto",
+        kinematic_metric="curv_energy",
+        image_size=224,
+        max_patches=2,
+        text_token_strategy="max", # for text mode
+        text_token_index=-1,
+        skip_backward=False
+    )
 
-    # 1. Run Inference (Action Mode)
-    print("\n[Pipeline] Step 1: Running Inference (Action Mode)...")
-    cmd_action = [
-        sys.executable, "-m", "experiment.simlingo_inference_baseline",
-        "--scene_dir", str(scenario_path),
-        "--output_dir", str(temp_action_dir),
-        "--target_mode", "auto",
-        "--explain_mode", "action",
-        "--kinematic_metric", "curv_energy",
-        "--image_size", "224",
-        "--max_patches", "2"
-    ]
-    run_command(cmd_action)
-
-    # 2. Run Inference (Text Mode)
-    print("\n[Pipeline] Step 2: Running Inference (Text Mode)...")
-    cmd_text = [
-        sys.executable, "-m", "experiment.simlingo_inference_baseline",
-        "--scene_dir", str(scenario_path),
-        "--output_dir", str(temp_text_dir),
-        "--target_mode", "auto",
-        "--explain_mode", "text",
-        "--text_token_strategy", "max",
-        "--text_token_index", "-1",
-        "--image_size", "224",
-        "--max_patches", "2"
-    ]
-    run_command(cmd_text)
-
-    # Helper to find the actual output directory (simlingo creates a subdir based on config)
-    def find_inference_subdir(base_dir: Path) -> Path:
-        # It usually creates a subdir like 'data_sample_small_01_action_...'
-        # We take the most recent one or the only one
-        subdirs = [d for d in base_dir.iterdir() if d.is_dir()]
-        if not subdirs:
-            raise RuntimeError(f"No output subdirectory found in {base_dir}")
-        # Sort by modification time just in case
-        subdirs.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-        return subdirs[0]
-
-    action_inference_dir = find_inference_subdir(temp_action_dir)
-    text_inference_dir = find_inference_subdir(temp_text_dir)
+    # Prepare persistent inference output directories
+    inference_action_dir = base_output_dir / "inference_action"
+    inference_text_dir = base_output_dir / "inference_text"
     
-    print(f"[Pipeline] Action inference output: {action_inference_dir}")
-    print(f"[Pipeline] Text inference output: {text_inference_dir}")
-
-    # Define methods and their configs
-    methods = [
+    # 2. Initialize Visualizers
+    # They need payload_root. Since we generate payloads on the fly, we point them to the
+    # expected location of PT files.
+    # SimLingo creates subdirs: output_dir / f"{scene_name}_{mode}" / "pt"
+    
+    # We need to know the exact path SimLingo will use.
+    # It uses `_prepare_output_subdir` which does: output_dir / f"{scene_dir.name}_{suffix}"
+    # So:
+    pt_action_root = inference_action_dir / f"{scenario_name}_action" / "pt"
+    pt_text_root = inference_text_dir / f"{scenario_name}_text" / "pt"
+    
+    # Ensure these exist (or at least the parent) so visualizers don't crash on init if they check
+    # But visualizers usually check in generate.
+    
+    print("[Pipeline] Initializing Visualizers...")
+    # Group visualizers by mode dependency
+    action_visualizers = [
         {
             "name": "ours",
-            "runner_cls": GenericAttentionActionVisualizer,
-            "inference_dir": action_inference_dir,
-            "kwargs": {"colormap": "JET", "alpha": 0.5}
-        },
-        {
-            "name": "generic_text",
-            "runner_cls": GenericAttentionTextVisualizer,
-            "inference_dir": text_inference_dir,
-            "kwargs": {"text_token_strategy": "max", "colormap": "JET", "alpha": 0.5}
+            "runner": GenericAttentionActionVisualizer(
+                device=args.device,
+                colormap="JET",
+                alpha=0.5,
+                payload_root=pt_action_root # Will be populated
+            ),
+            "pt_source": pt_action_root
         },
         {
             "name": "vit_rollout",
-            "runner_cls": VisionAttentionRollout,
-            "inference_dir": action_inference_dir,
-            "kwargs": {"start_layer": 0, "residual_alpha": 0.5, "colormap": "JET", "alpha": 0.5}
+            "runner": VisionAttentionRollout(
+                device=args.device,
+                start_layer=0,
+                residual_alpha=0.5,
+                colormap="JET",
+                alpha=0.5,
+                payload_root=pt_action_root # Use action PTs
+            ),
+            "pt_source": pt_action_root
         },
         {
             "name": "vit_flow",
-            "runner_cls": VisionAttentionFlow,
-            "inference_dir": action_inference_dir,
-            "kwargs": {"discard_ratio": 0.9, "residual_alpha": 0.5, "colormap": "JET", "alpha": 0.5}
+            "runner": VisionAttentionFlow(
+                device=args.device,
+                discard_ratio=0.9,
+                residual_alpha=0.5,
+                colormap="JET",
+                alpha=0.5,
+                payload_root=pt_action_root
+            ),
+            "pt_source": pt_action_root
         },
         {
             "name": "vit_raw",
-            "runner_cls": VisionRawAttention,
-            "inference_dir": action_inference_dir,
-            "kwargs": {"layer_index": -1, "head_strategy": "mean", "colormap": "JET", "alpha": 0.5}
+            "runner": VisionRawAttention(
+                device=args.device,
+                layer_index=-1,
+                head_strategy="mean",
+                colormap="JET",
+                alpha=0.5,
+                payload_root=pt_action_root
+            ),
+            "pt_source": pt_action_root
         }
     ]
 
-    # 3. Run Visualizations and Organize
-    print("\n[Pipeline] Step 3: Running Visualizations...")
-    
-    for method in methods:
-        name = method["name"]
-        print(f"\n[Pipeline] Processing method: {name}")
-        
-        method_dir = base_output_dir / name
-        pt_dir = method_dir / "pt"
-        raw_dir = method_dir / "raw_heatmap"
-        final_dir = method_dir / "final_heatmap"
-        
-        method_dir.mkdir(parents=True, exist_ok=True)
-        pt_dir.mkdir(parents=True, exist_ok=True)
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        final_dir.mkdir(parents=True, exist_ok=True)
+    text_visualizers = [
+        {
+            "name": "generic_text",
+            "runner": GenericAttentionTextVisualizer(
+                device=args.device,
+                colormap="JET",
+                alpha=0.5,
+                payload_root=pt_text_root
+            ),
+            "pt_source": pt_text_root
+        }
+    ]
 
-        # Copy PT files
-        src_pt_dir = method["inference_dir"] / "pt"
-        if src_pt_dir.exists():
-            print(f"[Pipeline] Copying PT files from {src_pt_dir} to {pt_dir}")
-            for pt_file in src_pt_dir.glob("*.pt"):
-                shutil.copy2(pt_file, pt_dir / pt_file.name)
-        else:
-            print(f"[Pipeline] Warning: No PT directory found at {src_pt_dir}")
+    # 3. Batch Loop
+    all_images = get_image_paths(scenario_path)
+    print(f"[Pipeline] Found {len(all_images)} images. Batch size: {args.batch_size}")
 
-        # Instantiate Runner
-        # Note: We pass the COPIED pt_dir as payload_root (or scene_dir)
-        # But wait, the runners expect payload_root to be the directory containing .pt files
-        # AND they might need images.
-        # The images are in the original scenario_path.
-        # We can pass scene_dir=scenario_path and payload_root=pt_dir.
+    for batch_idx, batch_files in enumerate(chunk_list(all_images, args.batch_size)):
+        print(f"\n[Pipeline] === Processing Batch {batch_idx + 1} ({len(batch_files)} frames) ===")
         
-        runner_cls = method["runner_cls"]
-        kwargs = method["kwargs"]
-        
-        # Initialize runner
-        # Note: Some runners might have different init args, but we standardized payload_root/scene_dir handling somewhat.
-        # However, init usually takes config_path, device, etc.
-        # We rely on defaults for config_path.
-        
-        try:
-            runner = runner_cls(
-                scene_dir=scenario_path, # Pass scene_dir to init if supported (ViT scripts support it now)
-                payload_root=pt_dir,     # Use the copied PT dir
-                **kwargs
-            )
-        except TypeError:
-            # Fallback for Generic runners which might not take scene_dir in init (they take it in generate)
-            # ours/generic init: (config_path, device, ..., payload_root)
-            runner = runner_cls(
-                payload_root=pt_dir,
-                **kwargs
-            )
-
-        # Run generation
-        # generate_scene_heatmaps(scene_dir, output_dir, suffix, raw_output_dir)
-        # We pass final_dir as output_dir, and raw_dir as raw_output_dir.
-        # scene_dir is scenario_path (where images are).
-        
-        runner.generate_scene_heatmaps(
-            scene_dir=scenario_path,
-            output_dir=final_dir,
-            suffix=name,
-            raw_output_dir=raw_dir
-        )
-        
-        # Cleanup: The runners create a subdirectory inside output_dir based on scene name.
-        # We want the files directly in final_dir/raw_dir?
-        # The user said: "each method directory is divided into pt directory, original heatmap directory and final result heatmap directory. Within these three directories, pt files or images have the same name as the images in the input scenario."
-        # Currently, `generate_scene_heatmaps` creates a subdirectory `ScenarioName_suffix`.
-        # We should move the files up and remove the subdir.
-        
-        def flatten_output(target_dir: Path):
-            # Find the subdir created by runner
-            # It usually starts with scenario_name
-            for subdir in target_dir.iterdir():
-                if subdir.is_dir() and subdir.name.startswith(scenario_name):
-                    print(f"[Pipeline] Flattening {subdir} to {target_dir}")
-                    for f in subdir.glob("*"):
-                        shutil.move(str(f), str(target_dir / f.name))
-                    subdir.rmdir()
-        
-        flatten_output(final_dir)
-        flatten_output(raw_dir)
-        
-        # Rename files to match original image names (remove suffix)
-        # e.g. 00001_ours.png -> 00001.png
-        def rename_files(target_dir: Path, suffix_str: str):
-            for f in target_dir.glob(f"*_{suffix_str}.png"):
-                new_name = f.name.replace(f"_{suffix_str}", "")
-                # Also remove _raw if present (for raw dir)
-                # But raw files are saved as {stem}.png in my refactoring!
-                # Wait, let's check my refactoring.
-                # ours.py: raw_path = raw_output_dir / f"{image_path.stem}.png" -> This is already correct!
-                # But final output: output_path = output_dir / f"{image_path.stem}_{suffix}.png"
+        # Helper function to run visualizers
+        def run_visualizers_for_batch(viz_list, batch_files):
+            for viz in viz_list:
+                name = viz["name"]
+                runner = viz["runner"]
+                pt_source = viz["pt_source"]
                 
-                # So for final_dir, we need to rename.
-                # For raw_dir, it should be fine if I implemented it correctly.
+                print(f"[Pipeline]   Method: {name}")
                 
-                if f.name != new_name:
-                    shutil.move(str(f), str(target_dir / new_name))
+                method_dir = base_output_dir / name
+                pt_dir = method_dir / "pt"
+                raw_dir = method_dir / "raw_heatmap"
+                final_dir = method_dir / "final_heatmap"
+                
+                pt_dir.mkdir(parents=True, exist_ok=True)
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                final_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Copy PT files for this batch to the method's PT dir
+                for img_file in batch_files:
+                    pt_file = pt_source / f"{img_file.stem}.pt"
+                    if pt_file.exists():
+                        shutil.copy2(pt_file, pt_dir / pt_file.name)
+                
+                # Update runner's payload_root and re-index
+                runner.payload_root = pt_dir
+                if hasattr(runner, "_index_payloads"):
+                    runner._payload_index = runner._index_payloads(pt_dir)
+                
+                # Run generation for this batch
+                runner.generate_scene_heatmaps(
+                    scene_dir=scenario_path,
+                    output_dir=final_dir,
+                    suffix=name,
+                    raw_output_dir=raw_dir,
+                    target_files=batch_files
+                )
+                
+                # Flatten output directories
+                def flatten_and_rename(target_dir: Path, suffix_str: str):
+                    for subdir in target_dir.iterdir():
+                        if subdir.is_dir() and subdir.name.startswith(scenario_name):
+                            for f in subdir.glob("*"):
+                                new_name = f.name
+                                if f.name.endswith(f"_{suffix_str}.png"):
+                                    new_name = f.name.replace(f"_{suffix_str}.png", ".png")
+                                dest = target_dir / new_name
+                                if not dest.exists():
+                                    shutil.move(str(f), str(dest))
+                            subdir.rmdir()
 
-        rename_files(final_dir, name)
-        # Check raw dir files
-        # In my refactoring: raw_path = raw_output_dir / f"{image_path.stem}.png"
-        # So raw files should already be named correctly.
+                flatten_and_rename(final_dir, name)
+                flatten_and_rename(raw_dir, "raw")
+                
+                # Explicit cleanup
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        # --- Inference Action ---
+        print("[Pipeline] Running Inference (Action)...")
+        inference_runner.explain_mode = "action"
+        inference_runner.run_batch(batch_files, inference_action_dir, scenario_path)
         
-        # However, `_prepare_output_subdir` was used for raw dir too in my refactoring?
-        # Yes: scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
-        # So raw files are in `raw_heatmap/ScenarioName_raw/`.
-        # And they are named `{stem}.png`.
-        # So I just need to flatten raw_dir.
-
-    # Cleanup temp dirs
-    print("\n[Pipeline] Cleaning up temporary directories...")
-    shutil.rmtree(temp_action_dir)
-    shutil.rmtree(temp_text_dir)
+        # --- Visualizations (Action) ---
+        print("[Pipeline] Running Visualizations (Action-dependent)...")
+        run_visualizers_for_batch(action_visualizers, batch_files)
+        
+        # --- Inference Text ---
+        print("[Pipeline] Running Inference (Text)...")
+        inference_runner.explain_mode = "text"
+        inference_runner.run_batch(batch_files, inference_text_dir, scenario_path)
+        
+        # --- Visualizations (Text) ---
+        print("[Pipeline] Running Visualizations (Text-dependent)...")
+        run_visualizers_for_batch(text_visualizers, batch_files)
 
     print(f"\n[Pipeline] Done! Results saved to {base_output_dir}")
+    
+    # Cleanup persistent inference dirs if desired?
+    # User might want to inspect them. Let's keep them or delete?
+    # "Organize all generated outputs... into a structured directory hierarchy under experiment_outputs/integrated/"
+    # The user didn't explicitly ask to delete intermediate inference outputs, but they are redundant if copied.
+    # I'll leave them for debugging or delete them to save space.
+    # Given OOM concerns, maybe delete? But disk space is usually cheap.
+    # I'll leave them but print a message.
+    print(f"[Pipeline] Intermediate inference outputs kept in {inference_action_dir} and {inference_text_dir}")
 
 
 if __name__ == "__main__":

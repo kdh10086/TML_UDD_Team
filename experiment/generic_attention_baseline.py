@@ -105,7 +105,9 @@ class GenericAttentionTextVisualizer:
         scene_dir: Path,
         output_dir: Path,
         suffix: str = "generic_text",
+        suffix: str = "generic_text",
         raw_output_dir: Optional[Path] = None,
+        target_files: Optional[List[Path]] = None,
     ) -> None:
         """scene_dir 내 pt 파일들에 대해 히트맵을 생성하고 저장한다."""
         scene_dir = Path(scene_dir)

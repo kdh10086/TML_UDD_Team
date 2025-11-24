@@ -86,7 +86,9 @@ class VisionAttentionRollout:
         scene_dir: Optional[Path],
         output_dir: Path,
         suffix: str = "vit_rollout",
+        suffix: str = "vit_rollout",
         raw_output_dir: Optional[Path] = None,
+        target_files: Optional[List[Path]] = None,
     ) -> None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -98,7 +100,21 @@ class VisionAttentionRollout:
             scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
         if not self._payload_index:
             raise RuntimeError("No payloads found under payload_root.")
-        for tag, payload_path in sorted(self._payload_index.items()):
+            
+        # If target_files is provided, we iterate over them.
+        # But wait, ViT scripts iterate over PAYLOADS, not images.
+        # "for tag, payload_path in sorted(self._payload_index.items()):"
+        # We need to filter payloads based on target_files (images).
+        
+        if target_files:
+            target_stems = {p.stem for p in target_files}
+            # Filter payload index
+            filtered_index = {k: v for k, v in self._payload_index.items() if k in target_stems}
+            items_to_process = sorted(filtered_index.items())
+        else:
+            items_to_process = sorted(self._payload_index.items())
+
+        for tag, payload_path in tqdm(items_to_process, desc=f"ViTRollout ({scene_dir.name if scene_dir else '?'})", unit="img"):
             payload = torch.load(payload_path, map_location=self.device)
             image_path = self._resolve_image_path(payload, scene_dir)
             route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)

@@ -879,160 +879,226 @@ class SimLingoInferenceBaseline:
         image_paths = sorted(
             [p for p in images_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
-        for image_path in tqdm(image_paths, desc=f"{scene_dir.name}", unit="img"):
-            record_tag = image_path.stem
-            current_speed = speed_table.get(record_tag, 0.0)
-            self.recorder.start_recording(record_tag)
-            driving_input, meta = self._prepare_driving_input(image_path, current_speed=current_speed)
-            outputs = self.model(driving_input)
-            pred_speed_wps, pred_route, _ = outputs
-            text_features = self._gather_text_features()
-            target_scalar, target_meta = self._compute_target_scalar(outputs, text_features)
-            if not self.skip_backward:
-                if target_scalar is None:
-                    raise RuntimeError("Target scalar could not be computed for relevance backprop.")
-                # Pass 1 Backward (Optional, usually broken for autoregressive)
-                # target_scalar.backward(retain_graph=False)
+    def _process_single_frame(
+        self,
+        image_path: Path,
+        speed_table: Dict[str, float],
+        scenario_subdirs: Dict[str, Path],
+        scenario_output_dir: Path,
+    ) -> None:
+        record_tag = image_path.stem
+        current_speed = speed_table.get(record_tag, 0.0)
+        self.recorder.start_recording(record_tag)
+        driving_input, meta = self._prepare_driving_input(image_path, current_speed=current_speed)
+        outputs = self.model(driving_input)
+        pred_speed_wps, pred_route, _ = outputs
+        text_features = self._gather_text_features()
+        target_scalar, target_meta = self._compute_target_scalar(outputs, text_features)
+        if not self.skip_backward:
+            if target_scalar is None:
+                raise RuntimeError("Target scalar could not be computed for relevance backprop.")
+            # Pass 1 Backward (Optional, usually broken for autoregressive)
+            # target_scalar.backward(retain_graph=False)
 
-            # Pass 2: Teacher Forcing Re-run for Gradients
-            # We use the generated text (or action) to construct a full sequence input
-            # and run a single forward pass to get connected gradients.
-            generated_text = text_features.get("decoded_text", "") if text_features else ""
-            
-            # Start recording for the gradient pass
-            self.recorder.start_recording(record_tag)
-            
-            tf_target_scalar, tf_meta = self._run_teacher_forcing_pass(
-                image_path, current_speed, generated_text, outputs
-            )
-            
-            if not self.skip_backward and tf_target_scalar is not None:
-                tf_target_scalar.backward()
-            
-            attention_maps = self.recorder.stop_recording()
-            # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
-            # DrivingModel이 attentions를 반환하지 않으므로, InternVLChatModel에 stash된 값을 가져옵니다.
-            attn_seq = None
-            # Try to find stashed attentions in the model hierarchy
-            if hasattr(self.model, "language_model") and hasattr(self.model.language_model, "all_attentions"):
-                 attn_seq = self.model.language_model.all_attentions
-                 # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.all_attentions")
-            elif hasattr(self.model, "language_model") and hasattr(self.model.language_model, "model") and hasattr(self.model.language_model.model, "all_attentions"):
-                 attn_seq = self.model.language_model.model.all_attentions
-                 # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.model.all_attentions")
-            
-            # Fallback: check outputs just in case
-            if attn_seq is None:
-                if hasattr(outputs, "attentions"):
-                    attn_seq = outputs.attentions
-                    self.debug_info["attn_source"] = "outputs.attentions"
-                elif isinstance(outputs, tuple):
-                    # Try to find the tuple element that looks like attentions (tuple of tensors)
-                    for item in outputs:
-                        if isinstance(item, (list, tuple)) and len(item) > 0 and torch.is_tensor(item[0]):
-                            # Assume this is the attentions tuple (usually length=num_layers)
-                            # Qwen2 has 24 layers.
-                            if len(item) >= 10: # Heuristic check
-                                attn_seq = item
-                                self.debug_info["attn_source"] = f"outputs_tuple_item_len_{len(item)}"
-                                break
-                    # If still not found, maybe it's the last element?
-                    if attn_seq is None and len(outputs) > 0:
-                         # Last element is often attentions if output_attentions=True
-                         last_item = outputs[-1]
-                         if isinstance(last_item, (list, tuple)):
-                             attn_seq = last_item
-                             self.debug_info["attn_source"] = "outputs_last_item"
+        # Pass 2: Teacher Forcing Re-run for Gradients
+        # We use the generated text (or action) to construct a full sequence input
+        # and run a single forward pass to get connected gradients.
+        generated_text = text_features.get("decoded_text", "") if text_features else ""
+        
+        # Start recording for the gradient pass
+        self.recorder.start_recording(record_tag)
+        
+        tf_target_scalar, tf_meta = self._run_teacher_forcing_pass(
+            image_path, current_speed, generated_text, outputs
+        )
+        
+        if not self.skip_backward and tf_target_scalar is not None:
+            tf_target_scalar.backward()
+        
+        attention_maps = self.recorder.stop_recording()
+        # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
+        # DrivingModel이 attentions를 반환하지 않으므로, InternVLChatModel에 stash된 값을 가져옵니다.
+        attn_seq = None
+        # Try to find stashed attentions in the model hierarchy
+        if hasattr(self.model, "language_model") and hasattr(self.model.language_model, "all_attentions"):
+                attn_seq = self.model.language_model.all_attentions
+                # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.all_attentions")
+        elif hasattr(self.model, "language_model") and hasattr(self.model.language_model, "model") and hasattr(self.model.language_model.model, "all_attentions"):
+                attn_seq = self.model.language_model.model.all_attentions
+                # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.model.all_attentions")
+        
+        # Fallback: check outputs just in case
+        if attn_seq is None:
+            if hasattr(outputs, "attentions"):
+                attn_seq = outputs.attentions
+                self.debug_info["attn_source"] = "outputs.attentions"
+            elif isinstance(outputs, tuple):
+                # Try to find the tuple element that looks like attentions (tuple of tensors)
+                for item in outputs:
+                    if isinstance(item, (list, tuple)) and len(item) > 0 and torch.is_tensor(item[0]):
+                        # Assume this is the attentions tuple (usually length=num_layers)
+                        # Qwen2 has 24 layers.
+                        if len(item) >= 10: # Heuristic check
+                            attn_seq = item
+                            self.debug_info["attn_source"] = f"outputs_tuple_item_len_{len(item)}"
+                            break
+                # If still not found, maybe it's the last element?
+                if attn_seq is None and len(outputs) > 0:
+                        # Last element is often attentions if output_attentions=True
+                        last_item = outputs[-1]
+                        if isinstance(last_item, (list, tuple)):
+                            attn_seq = last_item
+                            self.debug_info["attn_source"] = "outputs_last_item"
 
-                # print(f"[DEBUG] Fallback to outputs search: {len(attn_seq) if attn_seq else 0} layers")
-            else:
-                self.debug_info["attn_source"] = "stashed_all_attentions"
+            # print(f"[DEBUG] Fallback to outputs search: {len(attn_seq) if attn_seq else 0} layers")
+        else:
+            self.debug_info["attn_source"] = "stashed_all_attentions"
 
-            self.debug_info["outputs_type"] = str(type(outputs))
-            if isinstance(outputs, tuple):
-                self.debug_info["outputs_len"] = len(outputs)
+        self.debug_info["outputs_type"] = str(type(outputs))
+        if isinstance(outputs, tuple):
+            self.debug_info["outputs_len"] = len(outputs)
 
-            if attn_seq:
-                for idx, attn in enumerate(attn_seq):
+        if attn_seq:
+            for idx, attn in enumerate(attn_seq):
+                if attn is None:
+                    continue
+                if not torch.is_tensor(attn):
+                        # Skip non-tensor elements (e.g. if we accidentally picked up a tuple of strings)
+                        continue
+                attn_tensor = attn.detach().to("cpu")
+                grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
+                
+                # Force save to attention_maps with correct key
+                entry = {"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}
+                key = f"language_attn_layer_{idx}"
+                # Overwrite or append? The user wants ALL layers. 
+                # If recorder captured something, it might be partial. We trust this explicit capture more.
+                attention_maps[key] = [entry]
+        
+        # 추가: 비전 모델 attentions 저장 (from _patched_extract_feature)
+        # We access it via the vision model instance where we attached it
+        vision_model_instance = self.model.vision_model.image_encoder.model
+        if hasattr(vision_model_instance, "vision_attentions"):
+            vision_attentions = vision_model_instance.vision_attentions
+            if vision_attentions:
+                for idx, attn in enumerate(vision_attentions):
                     if attn is None:
                         continue
-                    if not torch.is_tensor(attn):
-                         # Skip non-tensor elements (e.g. if we accidentally picked up a tuple of strings)
-                         continue
                     attn_tensor = attn.detach().to("cpu")
                     grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
-                    
-                    # Force save to attention_maps with correct key
-                    entry = {"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}
-                    key = f"language_attn_layer_{idx}"
-                    # Overwrite or append? The user wants ALL layers. 
-                    # If recorder captured something, it might be partial. We trust this explicit capture more.
-                    attention_maps[key] = [entry]
-            
-            # 추가: 비전 모델 attentions 저장 (from _patched_extract_feature)
-            # We access it via the vision model instance where we attached it
-            vision_model_instance = self.model.vision_model.image_encoder.model
-            if hasattr(vision_model_instance, "vision_attentions"):
-                vision_attentions = vision_model_instance.vision_attentions
-                if vision_attentions:
-                    for idx, attn in enumerate(vision_attentions):
-                        if attn is None:
-                            continue
-                        attn_tensor = attn.detach().to("cpu")
-                        grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
-                        # Use a distinct key to avoid collision with hooks if any
-                        attention_maps[f"vision_attn_layer_{idx}_output"] = [{"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}]
-                # Clear it to avoid stale data
-                vision_model_instance.vision_attentions = None
+                    # Use a distinct key to avoid collision with hooks if any
+                    attention_maps[f"vision_attn_layer_{idx}_output"] = [{"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}]
+            # Clear it to avoid stale data
+            vision_model_instance.vision_attentions = None
 
-            if not self.skip_backward:
-                self.model.zero_grad(set_to_none=True)
-            
-            # Update target_info with TF meta if available (it might have better details)
-            if tf_meta:
-                target_meta.update(tf_meta)
+        if not self.skip_backward:
+            self.model.zero_grad(set_to_none=True)
+        
+        # Update target_info with TF meta if available (it might have better details)
+        if tf_meta:
+            target_meta.update(tf_meta)
 
-            payload = {
-                "tag": record_tag,
-                "image_path": str(image_path),
-                "input_speed_mps": current_speed,
-                "meta": meta,
-                "target_scalar": tf_target_scalar.detach().to("cpu") if tf_target_scalar is not None else None,
-                "target_info": target_meta,
-                "outputs": self._serialize_outputs(outputs),
-                "text_outputs": self._serialize_text_outputs(text_features),
-                "mode": self.explain_mode,
-                "attention": attention_maps,
-                "debug_info": self.debug_info,
-            }
-            payload_path = scenario_subdirs["pt"] / f"{record_tag}.pt"
-            torch.save(payload, payload_path)
-            image_hw = (meta["original_height"], meta["original_width"])
-            self._project_and_draw_points(
-                pred_route,
-                image_hw,
-                (255, 0, 0, 255),
-                radius=3,
-                output_path=scenario_subdirs["route_overlay"] / f"{record_tag}.png",
-            )
-            self._project_and_draw_points(
-                pred_speed_wps,
-                image_hw,
-                (0, 200, 0, 255),
-                radius=2,
-                output_path=scenario_subdirs["speed_overlay"] / f"{record_tag}.png",
-            )
-            self._write_text_outputs(
-                scenario_subdirs["text_output"] / f"{record_tag}.txt",
-                text_features,
-                language_fallback=outputs[-1],
-            )
-            self._write_tensor_txt(pred_route, scenario_subdirs["pred_route"] / f"{record_tag}.txt")
-            self._write_tensor_txt(
-                pred_speed_wps, scenario_subdirs["pred_speed_wps"] / f"{record_tag}.txt"
-            )
-            # 입력 원본 이미지도 정리용으로 복사
-            shutil.copy2(image_path, scenario_subdirs["input_images"] / image_path.name)
+        payload = {
+            "tag": record_tag,
+            "image_path": str(image_path),
+            "input_speed_mps": current_speed,
+            "meta": meta,
+            "target_scalar": tf_target_scalar.detach().to("cpu") if tf_target_scalar is not None else None,
+            "target_info": target_meta,
+            "outputs": self._serialize_outputs(outputs),
+            "text_outputs": self._serialize_text_outputs(text_features),
+            "mode": self.explain_mode,
+            "attention": attention_maps,
+            "debug_info": self.debug_info,
+        }
+        payload_path = scenario_subdirs["pt"] / f"{record_tag}.pt"
+        torch.save(payload, payload_path)
+        image_hw = (meta["original_height"], meta["original_width"])
+        self._project_and_draw_points(
+            pred_route,
+            image_hw,
+            (255, 0, 0, 255),
+            radius=3,
+            output_path=scenario_subdirs["route_overlay"] / f"{record_tag}.png",
+        )
+        self._project_and_draw_points(
+            pred_speed_wps,
+            image_hw,
+            (0, 200, 0, 255),
+            radius=2,
+            output_path=scenario_subdirs["speed_overlay"] / f"{record_tag}.png",
+        )
+        self._write_text_outputs(
+            scenario_subdirs["text_output"] / f"{record_tag}.txt",
+            text_features,
+            language_fallback=outputs[-1],
+        )
+        self._write_tensor_txt(pred_route, scenario_subdirs["pred_route"] / f"{record_tag}.txt")
+        self._write_tensor_txt(
+            pred_speed_wps, scenario_subdirs["pred_speed_wps"] / f"{record_tag}.txt"
+        )
+        # 입력 원본 이미지도 정리용으로 복사
+        shutil.copy2(image_path, scenario_subdirs["input_images"] / image_path.name)
+
+        # Clear recorder records to prevent memory accumulation
+        self.recorder.records.clear()
+        
+        # Explicit cleanup
+        del outputs, payload, attention_maps, text_features, driving_input
+        if not self.skip_backward:
+            del target_scalar
+            if tf_target_scalar is not None:
+                del tf_target_scalar
+        
+        # Force GC and empty cache
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def run_batch(self, image_paths: List[Path], output_dir: Path, scene_dir: Path) -> None:
+        """Run inference on a batch of images."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup speed table
+        speed_dir = scene_dir / self.speed_subdir if self.speed_subdir else None
+        speed_table: Dict[str, float] = {}
+        if speed_dir and speed_dir.exists():
+            speed_table = self._load_speed_table(speed_dir)
+            
+        # Setup output dirs
+        mode_suffix = "action" if self.explain_mode == "action" else "text"
+        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, mode_suffix)
+        scenario_subdirs = self._prepare_scenario_subdirs(scenario_output_dir)
+        
+        for image_path in tqdm(image_paths, desc=f"Batch ({self.explain_mode})", unit="img"):
+            self._process_single_frame(image_path, speed_table, scenario_subdirs, scenario_output_dir)
+
+    def run_scene(self, scene_dir: Path, output_dir: Path) -> None:
+        """시나리오 디렉토리(하위 images/)의 모든 이미지를 순회하며 추론 결과를 저장합니다."""
+        scene_dir = Path(scene_dir)
+        output_dir = Path(output_dir)
+        if not scene_dir.exists():
+            raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # frames 디렉토리 우선 사용, 없으면 images 폴백
+        candidate_dirs = []
+        if self.frames_subdir:
+            candidate_dirs.append(scene_dir / self.frames_subdir)
+        candidate_dirs.append(scene_dir / "images")
+        images_dir = None
+        for cdir in candidate_dirs:
+            if cdir.exists():
+                images_dir = cdir
+                break
+        if images_dir is None:
+            raise FileNotFoundError(f"No frames directory found under {scene_dir} (tried {candidate_dirs})")
+        
+        image_paths = sorted(
+            [p for p in images_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        )
+        
+        self.run_batch(image_paths, output_dir, scene_dir)
 
     def _run_teacher_forcing_pass(
         self,
@@ -1073,9 +1139,12 @@ class SimLingoInferenceBaseline:
         lang_label = self._build_language_label(
             prompt_str, placeholder_batch_list, num_patches, assistant_response=append_response
         )
-        print(f"[DEBUG] _prepare_driving_input: append_response='{append_response}'")
-        print(f"[DEBUG] _prepare_driving_input: lang_label.phrase_ids.shape={lang_label.phrase_ids.shape}")
+        if self.debug:
+            print(f"[DEBUG] _prepare_driving_input: append_response='{append_response}'")
+            print(f"[DEBUG] _prepare_driving_input: lang_label.phrase_ids.shape={lang_label.phrase_ids.shape}")
         
+        # Build DrivingInput
+        # prompt_token_ids = self._extract_prompt_token_ids(lang_label) # This line was not in the original code, but was in the instruction. Removing it.
         camera_intrinsics = get_camera_intrinsics(orig_hw[1], orig_hw[0], 110).unsqueeze(0).unsqueeze(0)
         camera_extrinsics = get_camera_extrinsics().unsqueeze(0).unsqueeze(0)
         driving_input = DrivingInput(
@@ -1353,15 +1422,18 @@ class SimLingoInferenceBaseline:
             # This is expensive but safe.
             prompt_only_input, _ = self._prepare_driving_input(image_path, current_speed, append_response="")
             prompt_len = prompt_only_input.prompt.phrase_ids.shape[1]
-            print(f"[DEBUG] Prompt len: {prompt_len}, Full seq len: {logits.shape[1]}")
+            if self.debug:
+                print(f"[DEBUG] Prompt len: {prompt_len}, Full seq len: {logits.shape[1]}")
             
-            # Generated part logits
+            # Identify generated tokens: those after prompt_len
             gen_logits = logits[:, prompt_len:, :] # [B, GenLen, Vocab]
-            print(f"[DEBUG] Gen logits shape: {gen_logits.shape}")
+            if self.debug:
+                print(f"[DEBUG] Gen logits shape: {gen_logits.shape}")
             
             if gen_logits.shape[1] == 0:
                 # Fallback if no text generated
-                print(f"[DEBUG] No text generated (gen_logits is empty).")
+                if self.debug:
+                    print(f"[DEBUG] No text generated (gen_logits is empty).")
                 return None, {"error": "no_text_generated"}
                 
             # Construct text_features dict for _compute_text_target
@@ -1379,7 +1451,8 @@ class SimLingoInferenceBaseline:
             
             full_ids = tf_input.prompt.phrase_ids
             gen_ids = full_ids[:, prompt_len:] # [B, GenLen]
-            print(f"[DEBUG] full_ids shape: {full_ids.shape}, gen_ids shape: {gen_ids.shape}")
+            if self.debug:
+                print(f"[DEBUG] full_ids shape: {full_ids.shape}, gen_ids shape: {gen_ids.shape}")
             
             # Gather logits for these ids
             # gen_logits: [B, GenLen, Vocab]
@@ -1389,10 +1462,15 @@ class SimLingoInferenceBaseline:
             # gen_logits.gather(2, gen_ids.unsqueeze(-1)).squeeze(-1)
             
             token_scores = torch.gather(gen_logits, 2, gen_ids.unsqueeze(-1)).squeeze(-1)
-            print(f"[DEBUG] token_scores shape after gather: {token_scores.shape}")
+            if self.debug:
+                print(f"[DEBUG] token_scores shape after gather: {token_scores.shape}")
+            # If we have multiple generated tokens, we might want to keep them all or pick one
+            # Logic for text_token_strategy is handled in _compute_text_target, but we need token_scores populated
+            
             if token_scores.dim() > 1:
                 token_scores = token_scores.squeeze(0) # [GenLen]
-            print(f"[DEBUG] token_scores shape final: {token_scores.shape}")
+            if self.debug:
+                print(f"[DEBUG] token_scores shape final: {token_scores.shape}")
             
             # Also need token_ids, token_strings for meta
             token_ids = gen_ids.squeeze(0)
@@ -1599,6 +1677,11 @@ def parse_args():
         help="Explicit generated token index to use when --text_token_strategy=index.",
     )
     parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug prints.",
+    )
+    parser.add_argument(
         "--kinematic_metric",
         type=str,
         choices=list(KINEMATIC_METRICS.keys()),
@@ -1668,6 +1751,7 @@ def main():
         use_spline=args.use_spline,
         spline_smoothing=args.spline_smoothing,
         spline_num_samples=args.spline_num_samples,
+        debug=args.debug,
     )
     runner.run_scene(args.scene_dir, args.output_dir)
 

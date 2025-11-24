@@ -62,13 +62,33 @@ echo "[*] Installing Python dependencies (requirements.txt)..."
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 
+echo "[*] Downloading SimLingo checkpoints..."
+if [ ! -d "checkpoints/simlingo" ]; then
+    # We clone into checkpoints/simlingo directly
+    git lfs clone https://huggingface.co/RenzKa/simlingo checkpoints/simlingo
+else
+    echo "[*] Checkpoints directory already exists. Skipping clone."
+fi
+
+echo "[*] Copying and unzipping essential datasets..."
+# Essential: new_sample_dataset.zip, sample_small.zip
+if [ -f "/mnt/data1/new_sample_dataset.zip" ]; then
+    echo "[*] Unzipping new_sample_dataset.zip..."
+    unzip -o -q /mnt/data1/new_sample_dataset.zip -d data/
+else
+    echo "[!] /mnt/data1/new_sample_dataset.zip not found (skipping)."
+fi
+
+if [ -f "/mnt/data1/sample_small.zip" ]; then
+    echo "[*] Unzipping sample_small.zip..."
+    unzip -o -q /mnt/data1/sample_small.zip -d data/
+else
+    echo "[!] /mnt/data1/sample_small.zip not found (skipping)."
+fi
+
 cat <<'EOS'
 [*] Bootstrap complete.
 Remaining steps (manual):
   - Ensure CUDA 12.1-compatible driver is available for torch 2.3.1+cu121.
-  - If checkpoints are missing, you can clone the model directly:
-      git lfs clone https://huggingface.co/RenzKa/simlingo checkpoints/simlingo/simlingo/checkpoints/
-  - Place preprocessed data under data/<dataset>/<scenario>/ with:
-      video_garmin/ (frames), video_saliency/ (heatmaps), video_garmin_speed/ (m/s speeds)
   - First inference run will download HuggingFace models (InternVL2-1B) if not cached.
 EOS

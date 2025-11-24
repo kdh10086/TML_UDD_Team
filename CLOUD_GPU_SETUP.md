@@ -114,12 +114,12 @@ cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
 
 ### Persistent Storage에 저장된 데이터셋을 /UDD_TML_Team/data/로 복사, 압축해제
 ```bash
-#샘플 데이터셋 복사
+#샘플 데이터셋 복사 (필수)
 unzip /mnt/data1/new_sample_dataset.zip -d /root/TML_UDD_Team/data/
+#샘플 작은 데이터셋 복사 (필수)
+unzip /mnt/data1/sample_small.zip -d /root/TML_UDD_Team/data/
 #원본 데이터셋 복사 (옵션)
 unzip /mnt/data1/DREYEVE_DATA_filtered.zip -d /root/TML_UDD_Team/data/
-#샘플 작은 데이터셋 복사 (옵션)
-unzip /mnt/data1/sample_small.zip -d /root/TML_UDD_Team/data/
 ```
 
 ## 5) 데이터 배치
