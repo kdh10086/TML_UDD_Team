@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -344,30 +345,30 @@ class AttentionRecorder:
 
     @staticmethod
     def _extract_attention(output) -> Optional[torch.Tensor]:
-        if isinstance(output, torch.Tensor) and output.dim() == 4:
-            return output
-        # Hugging Face blocks may return objects with .attentions list
-        if hasattr(output, "attentions"):
-            attn_obj = output.attentions
-            if isinstance(attn_obj, (list, tuple)) and attn_obj:
-                if all(torch.is_tensor(x) and x.dim() == 4 for x in attn_obj):
-                    try:
-                        return torch.stack(attn_obj, dim=0)  # [L,B,H,S,S]
-                    except Exception:
-                        return attn_obj[0]
-        if isinstance(output, (list, tuple)):
-            for elem in output:
-                if torch.is_tensor(elem) and elem.dim() == 4:
-                    return elem
-                if hasattr(elem, "attentions"):
-                    attn_obj = elem.attentions
-                    if isinstance(attn_obj, (list, tuple)) and attn_obj:
-                        if all(torch.is_tensor(x) and x.dim() == 4 for x in attn_obj):
-                            try:
-                                return torch.stack(attn_obj, dim=0)
-                            except Exception:
-                                return attn_obj[0]
-        return None
+        """Recursively pull the first available 4D attention tensor or stack of them."""
+
+        def _collect(obj):
+            if torch.is_tensor(obj) and obj.dim() == 4:
+                yield obj
+                return
+            if hasattr(obj, "attentions"):
+                yield from _collect(obj.attentions)
+            if isinstance(obj, Mapping):
+                for val in obj.values():
+                    yield from _collect(val)
+            elif isinstance(obj, (list, tuple)):
+                for val in obj:
+                    yield from _collect(val)
+
+        tensors = list(_collect(output))
+        if not tensors:
+            return None
+        if len(tensors) == 1:
+            return tensors[0]
+        try:
+            return torch.stack(tensors, dim=0)  # [n, B, H, S, S] if shapes match
+        except Exception:
+            return tensors[0]
 
     def start_recording(self, tag: str) -> None:
         self._current_tag = tag
@@ -541,10 +542,10 @@ class SimLingoInferenceBaseline:
             vision_model = getattr(self.model.vision_model.image_encoder.model, "vision_model", None)
             if vision_model is not None:
                 # hook the top module to capture attentions list
-                self.recorder.register_module(vision_model, "vision_block_top", record_grad=False)
+                self.recorder.register_module(vision_model, "vision_block_top", record_grad=True)
                 if hasattr(vision_model, "encoder"):
                     for idx, block in enumerate(vision_model.encoder.layers):
-                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
+                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=True)
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
