@@ -259,32 +259,31 @@ class VisionAttentionRollout:
                 raise ValueError(f"Expected attention tensor of shape [B,H,S,S], got {mat.shape}")
             bsz, _, seq_len, _ = mat.shape
             attn = mat.mean(dim=1)
+            # experiment_alt logic: R = R + torch.bmm(attn_mean, R)
+            # We initialize joint (R) as identity matrix for the first layer if it's None.
+            
+            if joint is None:
+                # Initialize R as identity matrix [B, S, S]
+                joint = torch.eye(seq_len, device=attn.device, dtype=attn.dtype).unsqueeze(0).expand(bsz, seq_len, seq_len)
+            
+            # R = torch.bmm(attn_mean, R)
+            # Note: experiment_alt adds residual and normalizes attn_mean before this step.
+            # But wait, in experiment_alt:
+            #   attn_mean = attn.mean(dim=1)
+            #   attn_mean = attn_mean + torch.eye(S)
+            #   attn_mean = attn_mean / attn_mean.sum(dim=-1, keepdim=True)
+            #   R = torch.bmm(attn_mean, R)
+            
+            # I need to replicate this preprocessing of attn here.
             eye = torch.eye(seq_len, device=attn.device, dtype=attn.dtype).unsqueeze(0)
-        # joint is [B, S, S].
-        # experiment_alt logic: R = R + torch.bmm(attn_mean, R)
-        # Here we did: joint = torch.bmm(attn, joint) which is equivalent if joint starts as identity.
-        # However, experiment_alt accumulates relevance.
-        # Let's align exactly with experiment_alt's _get_rollout_relevance.
-        
-        # In experiment_alt:
-        # R = torch.eye(S).expand(B, S, S)
-        # for layer:
-        #   attn_mean = attn.mean(dim=1)
-        #   attn_mean = attn_mean + torch.eye(S)
-        #   attn_mean = attn_mean / attn_mean.sum(dim=-1, keepdim=True)
-        #   R = torch.bmm(attn_mean, R)
-        # return R[-1, 1:, 1:].sum(dim=0)
-        
-        # My _compute_rollout was doing:
-        # joint = attn (first layer)
-        # joint = torch.bmm(attn, joint)
-        # This is equivalent to R = A_n * ... * A_1 * I
-        
-        # The key difference is the selection at the end.
-        # experiment_alt selects the LAST batch item (Global View) and sums over rows (relevance of all tokens TO target? No, R[i,j] is relevance of j to i).
-        # R[-1, 1:, 1:].sum(dim=0) -> Sum of relevance of each token j to ALL tokens i (excluding CLS).
-        # This effectively measures "how much does this token contribute to the entire image representation in the global view".
-        
+            attn = attn + eye
+            attn = attn / attn.sum(dim=-1, keepdim=True)
+            
+            joint = torch.bmm(attn, joint)
+            
+        if joint is None:
+            raise RuntimeError("Failed to compute rollout due to missing attention matrices.")
+            
         return joint
 
     def _extract_image_scores(self, rollout: torch.Tensor, num_image_tokens: int) -> torch.Tensor:
