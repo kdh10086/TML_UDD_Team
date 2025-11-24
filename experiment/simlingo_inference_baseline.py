@@ -826,6 +826,17 @@ class SimLingoInferenceBaseline:
                     raise RuntimeError("Target scalar could not be computed for relevance backprop.")
                 target_scalar.backward(retain_graph=False)
             attention_maps = self.recorder.stop_recording()
+            # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
+            attn_seq = getattr(outputs, "attentions", None)
+            if attn_seq:
+                attn_entries = []
+                for idx, attn in enumerate(attn_seq):
+                    if attn is None:
+                        continue
+                    attn_tensor = attn.detach().to("cpu")
+                    grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
+                    attn_entries.append({"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)})
+                    attention_maps[f"language_attn_layer_{idx}"] = [attn_entries[-1]]
             if not self.skip_backward:
                 self.model.zero_grad(set_to_none=True)
             payload = {
