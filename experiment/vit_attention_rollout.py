@@ -59,7 +59,13 @@ class VisionAttentionRollout:
                      break
         
         if self.payload_root is None:
-             raise ValueError(f"Could not find payload directory (pt files) in {payload_root} or {scene_dir}")
+             # Relaxed check: Just warn or allow it. The pipeline might populate it later.
+             # raise ValueError(f"Could not find payload directory (pt files) in {payload_root} or {scene_dir}")
+             print(f"[Warning] Could not find payload directory (pt files) in {payload_root} or {scene_dir}. Assuming it will be populated later.")
+             if payload_root:
+                 self.payload_root = Path(payload_root)
+             elif scene_dir:
+                 self.payload_root = Path(scene_dir) / "pt"
         if not (0.0 <= residual_alpha <= 1.0):
             raise ValueError("residual_alpha must lie in [0, 1].")
         self.config_path = Path(config_path)

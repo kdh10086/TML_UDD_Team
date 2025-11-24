@@ -95,7 +95,10 @@ def main():
     pt_text_root = inference_text_dir / f"{scenario_name}_text" / "pt"
     
     # Ensure these exist (or at least the parent) so visualizers don't crash on init if they check
-    # But visualizers usually check in generate.
+    # Visualizers check for existence of payload_root in __init__
+    print(f"[Pipeline] Pre-creating PT directories: {pt_action_root}, {pt_text_root}")
+    pt_action_root.mkdir(parents=True, exist_ok=True)
+    pt_text_root.mkdir(parents=True, exist_ok=True)
     
     print("[Pipeline] Initializing Visualizers...")
     # Group visualizers by mode dependency
