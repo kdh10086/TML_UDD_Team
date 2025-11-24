@@ -522,10 +522,10 @@ class SimLingoVisualizer:
         self._remove_hooks()
 
     def _build_model(self):
-        print(f"Loading model from {self.ckpt_path}...")
+        print(f"Loading model from {self.checkpoint_path}...")
         
         # Load Config
-        cfg = OmegaConf.load(self.cfg_path)
+        cfg = OmegaConf.load(self.config_path)
         
         # Load Model using the baseline class method (static or similar)
         # We need to instantiate the model structure first
@@ -554,8 +554,8 @@ class SimLingoVisualizer:
         model = hydra.utils.instantiate(cfg.model)
         
         # Load Checkpoint
-        if self.ckpt_path.exists():
-            checkpoint = torch.load(self.ckpt_path, map_location="cpu")
+        if self.checkpoint_path.exists():
+            checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
             if "state_dict" in checkpoint:
                 state_dict = checkpoint["state_dict"]
             else:
@@ -566,7 +566,7 @@ class SimLingoVisualizer:
             keys = model.load_state_dict(state_dict, strict=False)
             print(f"Model loaded. Missing keys: {len(keys.missing_keys)}, Unexpected keys: {len(keys.unexpected_keys)}")
         else:
-            print(f"WARNING: Checkpoint {self.ckpt_path} not found!")
+            print(f"WARNING: Checkpoint {self.checkpoint_path} not found!")
 
         model.to(self.device)
         
