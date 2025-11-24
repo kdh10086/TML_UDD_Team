@@ -896,7 +896,10 @@ class SimLingoInferenceBaseline:
             
             attention_maps = self.recorder.stop_recording()
             # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
-            # DrivingModel이 attentions를 반환하지 않으므로, InternVLChatModel에 stash된 값을 가져옵니다.
+            # SimLingoInferenceBaseline.model -> DrivingModel
+            # DrivingModel.language_model -> LLM wrapper (likely)
+            # LLM.model -> InternVLChatModel
+            # InternVLChatModel.all_attentions -> Stashed tuple
             attn_seq = None
             # Try to find stashed attentions in the model hierarchy
             if hasattr(self.model, "language_model") and hasattr(self.model.language_model, "all_attentions"):
