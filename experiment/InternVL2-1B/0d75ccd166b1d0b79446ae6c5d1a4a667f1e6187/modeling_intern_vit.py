@@ -224,7 +224,7 @@ class InternAttention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x, attn
 
     def _flash_attn(self, x, key_padding_mask=None, need_weights=False):
         qkv = self.qkv(x)
@@ -241,11 +241,13 @@ class InternAttention(nn.Module):
         )
         outs = self.proj(rearrange(context, 'b s h d -> b s (h d)'))
         outs = self.proj_drop(outs)
-        return outs
+        return outs, None
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        x = self._naive_attn(hidden_states) if not self.use_flash_attn else self._flash_attn(hidden_states)
-        return x
+    def forward(self, hidden_states: torch.Tensor, output_attentions: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        x, attn = self._naive_attn(hidden_states) if not self.use_flash_attn else self._flash_attn(hidden_states)
+        if not output_attentions:
+            attn = None
+        return x, attn
 
 
 class InternMLP(nn.Module):
@@ -283,16 +285,18 @@ class InternVisionEncoderLayer(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-    ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor], Optional[Tuple[torch.FloatTensor]]]:
+            output_attentions: bool = False,
+    ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         """
         Args:
             hidden_states (`Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]`): input to the layer of shape `(batch, seq_len, embed_dim)`
         """
-        hidden_states = hidden_states + self.drop_path1(self.attn(self.norm1(hidden_states).to(hidden_states.dtype)) * self.ls1)
+        attn_output, attn_weights = self.attn(self.norm1(hidden_states).to(hidden_states.dtype), output_attentions=output_attentions)
+        hidden_states = hidden_states + self.drop_path1(attn_output * self.ls1)
 
         hidden_states = hidden_states + self.drop_path2(self.mlp(self.norm2(hidden_states).to(hidden_states.dtype)) * self.ls2)
 
-        return hidden_states
+        return hidden_states, attn_weights
 
 
 class InternVisionEncoder(nn.Module):
@@ -317,6 +321,7 @@ class InternVisionEncoder(nn.Module):
     def forward(
             self,
             inputs_embeds,
+            output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutput]:
@@ -330,12 +335,14 @@ class InternVisionEncoder(nn.Module):
             return_dict (`bool`, *optional*):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_states = () if output_hidden_states else None
+        all_attentions = () if output_attentions else None
         hidden_states = inputs_embeds
 
         for idx, encoder_layer in enumerate(self.layers):
@@ -344,20 +351,24 @@ class InternVisionEncoder(nn.Module):
             if self.gradient_checkpointing and self.training:
                 layer_outputs = torch.utils.checkpoint.checkpoint(
                     encoder_layer,
-                    hidden_states)
+                    hidden_states,
+                    output_attentions)
             else:
                 layer_outputs = encoder_layer(
                     hidden_states,
+                    output_attentions=output_attentions,
                 )
-            hidden_states = layer_outputs
+            hidden_states = layer_outputs[0]
+            if output_attentions:
+                all_attentions = all_attentions + (layer_outputs[1],)
 
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states] if v is not None)
+            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
         return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states
+            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
         )
 
 
@@ -393,10 +404,12 @@ class InternVisionModel(PreTrainedModel):
     def forward(
             self,
             pixel_values: Optional[torch.FloatTensor] = None,
+            output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             pixel_embeds: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -414,6 +427,7 @@ class InternVisionModel(PreTrainedModel):
                 raise ValueError(f'wrong pixel_values size: {pixel_values.shape}')
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
+            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )

@@ -102,7 +102,19 @@ def _patched_extract_feature(self, pixel_values, **kwargs):
         return_dict=True,
     )
     # keep return shape identical to original (hidden states only)
+    # keep return shape identical to original (hidden states only)
     if hasattr(outputs, "last_hidden_state"):
+        # Store vision attentions on the model instance for later retrieval
+        if hasattr(outputs, "attentions") and outputs.attentions is not None:
+            # We attach it to the model instance (self.model) so we can access it later
+            self.model.vision_attentions = outputs.attentions
+            # Also retain grad for all vision attentions
+            for attn in outputs.attentions:
+                if attn is not None and torch.is_tensor(attn):
+                    try:
+                        attn.retain_grad()
+                    except Exception:
+                        pass
         return outputs.last_hidden_state
     # fallback to original behavior if unexpected return
     if _orig_extract_feature is not None:
@@ -628,18 +640,18 @@ class SimLingoInferenceBaseline:
             vision_model = getattr(vision_container, "model", None)
             if vision_model is not None:
                 # top-level AutoModel (captures BaseModelOutput.attentions if provided)
-                self.recorder.register_module(vision_model, "vision_model_top", record_grad=False)
+                self.recorder.register_module(vision_model, "vision_model_top", record_grad=True)
                 # inner vision encoder (e.g., vision_model.encoder.layers)
                 core = getattr(vision_model, "vision_model", vision_model)
                 if hasattr(core, "encoder"):
                     for idx, block in enumerate(core.encoder.layers):
-                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
+                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=True)
                 # attention submodules directly (to force per-layer attn capture)
                 for sub_name, sub_module in vision_model.named_modules():
                     cls = sub_module.__class__.__name__.lower()
                     if "attention" in cls or "attn" in sub_name.lower():
                         safe_name = sub_name.replace(".", "_")
-                        self.recorder.register_module(sub_module, f"vision_attn_{safe_name}", record_grad=False)
+                        self.recorder.register_module(sub_module, f"vision_attn_{safe_name}", record_grad=True)
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
@@ -867,6 +879,23 @@ class SimLingoInferenceBaseline:
                     grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
                     attn_entries.append({"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)})
                     attention_maps[f"language_attn_layer_{idx}"] = [attn_entries[-1]]
+            
+            # 추가: 비전 모델 attentions 저장 (from _patched_extract_feature)
+            # We access it via the vision model instance where we attached it
+            vision_model_instance = self.model.vision_model.image_encoder.model
+            if hasattr(vision_model_instance, "vision_attentions"):
+                vision_attentions = vision_model_instance.vision_attentions
+                if vision_attentions:
+                    for idx, attn in enumerate(vision_attentions):
+                        if attn is None:
+                            continue
+                        attn_tensor = attn.detach().to("cpu")
+                        grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
+                        # Use a distinct key to avoid collision with hooks if any
+                        attention_maps[f"vision_attn_layer_{idx}_output"] = [{"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}]
+                # Clear it to avoid stale data
+                vision_model_instance.vision_attentions = None
+
             if not self.skip_backward:
                 self.model.zero_grad(set_to_none=True)
             
