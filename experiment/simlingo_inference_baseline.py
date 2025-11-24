@@ -678,6 +678,16 @@ class SimLingoInferenceBaseline:
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
+            
+            # Unwrap PeftModel if present
+            # PeftModel -> base_model -> model (usually)
+            if "PeftModel" in str(type(lm)):
+                 # print(f"[DEBUG] Unwrapping PeftModel: {type(lm)}")
+                 if hasattr(lm, "base_model") and hasattr(lm.base_model, "model"):
+                     lm = lm.base_model.model
+                 elif hasattr(lm, "base_model"):
+                     lm = lm.base_model
+            
             # top-level CausalLM/LLM module (captures BaseModelOutput.attentions if provided)
             self.recorder.register_module(lm, "language_model_top", record_grad=True)
             
