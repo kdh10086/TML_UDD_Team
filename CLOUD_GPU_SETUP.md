@@ -245,7 +245,7 @@ python -m experiment.vit_raw_attention \
   예: `unzip sim_outputs.zip -d ./experiment_outputs/` → `./experiment_outputs/`에 압축해제
 
 - scp 다운로드(로컬에서 실행): `scp -P <PORT> <user>@<host>:<remote_path.zip> <local_dest_dir>/`  
-  예: `scp -P 30002 root@202.39.40.153:/root/TML_UDD_Team/experiment_outputs/sim_outputs.zip ~/home/컴퓨터이름/TML_UDD_Team/experiment_outputs/cloud_outputs/`
+  예: `scp -P 30022 root@202.39.40.153:/root/TML_UDD_Team/experiment_outputs/sim_outputs.zip ~/TML_UDD_Team/experiment_outputs/simlingo_inference/`
 
 ## 7) 기타
 - FlashAttention2 미설치 시 경고만 출력, 동작에는 문제 없음.

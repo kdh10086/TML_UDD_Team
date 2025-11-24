@@ -38,48 +38,21 @@ SIMLINGO_SRC = REPO_ROOT / "external" / "simlingo"
 if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
     sys.path.insert(0, str(SIMLINGO_SRC))
 # Use locally patched InternVL2 module cache (copied to experiment/InternVL2-1B)
-LOCAL_HF_MODULES = REPO_ROOT / "experiment" / "InternVL2-1B"
-if LOCAL_HF_MODULES.exists():
-    os.environ["HF_MODULES_CACHE"] = str(LOCAL_HF_MODULES.resolve())
+LOCAL_TFMM_ROOT = REPO_ROOT / "experiment" / "InternVL2-1B" / "transformers_modules"
+os.environ["HF_MODULES_CACHE"] = str(LOCAL_TFMM_ROOT.resolve())
 
 # Force-import patched InternVL2 modules so AutoModel uses them instead of downloading
-def _register_local_internvl_modules():
-    base = LOCAL_HF_MODULES / "0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187"
-    if not base.exists():
+# pre-load package stubs for transformers dynamic imports
+def _ensure_pkg(name: str, path: Path):
+    if name in sys.modules:
         return
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [str(path)]
+    sys.modules[name] = pkg
 
-    # Ensure package hierarchy exists for relative imports
-    def _ensure_pkg(name: str, path: Path):
-        if name in sys.modules:
-            return
-        pkg = types.ModuleType(name)
-        pkg.__path__ = [str(path)]
-        sys.modules[name] = pkg
-
-    _ensure_pkg("transformers_modules", base.parent)
-    _ensure_pkg("transformers_modules.OpenGVLab", base.parent / "OpenGVLab")
-    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", base)
-
-    module_map = {
-        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_internvl_chat": base / "modeling_internvl_chat.py",
-        "transformers_modules.OpenGVLab.InternVL2-1B.configuration_intern_vit": base / "configuration_intern_vit.py",
-        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_intern_vit": base / "modeling_intern_vit.py",
-        "transformers_modules.OpenGVLab.InternVL2-1B.conversation": base / "conversation.py",
-    }
-    for mod_name, path in module_map.items():
-        if not path.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(
-            mod_name, path, submodule_search_locations=[str(path.parent)]
-        )
-        if spec and spec.loader:
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[mod_name] = module
-            spec.loader.exec_module(module)
-
-
-if LOCAL_HF_MODULES.exists():
-    _register_local_internvl_modules()
+_ensure_pkg("transformers_modules", LOCAL_TFMM_ROOT)
+_ensure_pkg("transformers_modules.OpenGVLab", LOCAL_TFMM_ROOT / "OpenGVLab")
+_ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B")
 
 # Patch Qwen2Attention forward to stash attn weights for all layers/heads
 _orig_qwen2_attn_forward = Qwen2Attention.forward
