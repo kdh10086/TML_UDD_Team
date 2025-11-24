@@ -52,7 +52,27 @@ def _ensure_pkg(name: str, path: Path):
 
 _ensure_pkg("transformers_modules", LOCAL_TFMM_ROOT)
 _ensure_pkg("transformers_modules.OpenGVLab", LOCAL_TFMM_ROOT / "OpenGVLab")
-_ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B")
+
+# [CRITICAL] Find the hash directory containing modeling_internvl_chat.py
+# We MUST use the hashed directory because AutoModel.from_pretrained with trust_remote_code=True
+# expects the specific hash present in the config or downloads it.
+# To force usage of our local custom code, we map the package to this hash dir.
+internvl_root = LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B"
+hash_dir = None
+if internvl_root.exists():
+    for child in internvl_root.iterdir():
+        if child.is_dir() and (child / "modeling_internvl_chat.py").exists():
+            hash_dir = child
+            break
+
+if hash_dir:
+    print(f"[SimLingo] Found custom module hash dir: {hash_dir.name}")
+    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", hash_dir)
+    # ALSO register the hashed package name to resolve relative imports within the module
+    _ensure_pkg(f"transformers_modules.OpenGVLab.InternVL2-1B.{hash_dir.name}", hash_dir)
+else:
+    print("[SimLingo] Warning: Could not find hash dir with modeling_internvl_chat.py, using root")
+    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", internvl_root)
 
 # Patch Qwen2Attention forward to stash attn weights for all layers/heads
 _orig_qwen2_attn_forward = Qwen2Attention.forward
@@ -869,9 +889,19 @@ class SimLingoInferenceBaseline:
             
             attention_maps = self.recorder.stop_recording()
             # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
-            attn_seq = getattr(outputs, "attentions", None)
+            # DrivingModel이 attentions를 반환하지 않으므로, InternVLChatModel에 stash된 값을 가져옵니다.
+            attn_seq = None
+            # Try to find stashed attentions in the model hierarchy
+            if hasattr(self.model, "language_model") and hasattr(self.model.language_model, "all_attentions"):
+                 attn_seq = self.model.language_model.all_attentions
+            elif hasattr(self.model, "language_model") and hasattr(self.model.language_model, "model") and hasattr(self.model.language_model.model, "all_attentions"):
+                 attn_seq = self.model.language_model.model.all_attentions
+            
+            # Fallback: check outputs just in case
+            if attn_seq is None:
+                attn_seq = getattr(outputs, "attentions", None)
+
             if attn_seq:
-                attn_entries = []
                 for idx, attn in enumerate(attn_seq):
                     if attn is None:
                         continue

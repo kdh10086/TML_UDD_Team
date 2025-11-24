@@ -134,10 +134,13 @@ class InternVLChatModel(PreTrainedModel):
             position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            output_attentions=output_attentions,
+            output_attentions=True,  # Force output_attentions=True for analysis
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        # Stash attentions for external access (since DrivingModel might discard them)
+        if hasattr(outputs, "attentions"):
+            self.all_attentions = outputs.attentions
         logits = outputs.logits
 
         loss = None
