@@ -354,7 +354,7 @@ class SimLingoVisualizer:
                  
         return hook
 
-    def _register_hooks(self):
+    def _register_hooks(self, method="all"):
         self.hooks = []
         self.attn_maps = {}
         self.grad_maps = {}
@@ -379,25 +379,26 @@ class SimLingoVisualizer:
                 
             self.hooks.append(target.register_forward_hook(self.get_hook(f"vision_layer_{i}")))
 
-        # Register hooks for Language Model
-        lm = self.model.language_model
-        if hasattr(lm, 'model'): # Handle PeftModel or similar wrappers
-            lm = lm.model
+        # Register hooks for Language Model (only if needed)
+        if method in ["generic", "all", "ours"]:
+            lm = self.model.language_model
+            if hasattr(lm, 'model'): # Handle PeftModel or similar wrappers
+                lm = lm.model
+                
+            llm_layers = None
+            if hasattr(lm, 'model') and hasattr(lm.model, 'layers'): # Qwen2ForCausalLM -> Qwen2Model -> layers
+                llm_layers = lm.model.layers
+            elif hasattr(lm, 'layers'): # Direct access to layers
+                llm_layers = lm.layers
             
-        llm_layers = None
-        if hasattr(lm, 'model') and hasattr(lm.model, 'layers'): # Qwen2ForCausalLM -> Qwen2Model -> layers
-            llm_layers = lm.model.layers
-        elif hasattr(lm, 'layers'): # Direct access to layers
-            llm_layers = lm.layers
-        
-        if llm_layers is None:
-            print("WARNING: Could not find LLM layers for hooking.")
-            return
+            if llm_layers is None:
+                print("WARNING: Could not find LLM layers for hooking.")
+                return
 
-        for i, layer in enumerate(llm_layers):
-            # For LLM layers, hooking the layer directly is often sufficient if output_attentions=True
-            # as the attention weights will be part of the layer's output tuple.
-            self.hooks.append(layer.register_forward_hook(self.get_hook(f"language_layer_{i}")))
+            for i, layer in enumerate(llm_layers):
+                # For LLM layers, hooking the layer directly is often sufficient if output_attentions=True
+                # as the attention weights will be part of the layer's output tuple.
+                self.hooks.append(layer.register_forward_hook(self.get_hook(f"language_layer_{i}")))
 
     def _remove_hooks(self):
         for h in self.hooks:
