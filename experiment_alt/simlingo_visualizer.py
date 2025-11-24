@@ -696,10 +696,10 @@ class SimLingoVisualizer:
             print("DEBUG: No image_token_indices found in meta!")
             return torch.zeros(1)
             
-        # Select Global View tokens (last num_patches)
-        num_patches = meta.get("num_patches", 256)
-        if len(image_indices) > num_patches:
-            image_indices = image_indices[-num_patches:]
+        # Select Global View tokens (last num_image_tokens_per_patch)
+        num_tokens = meta.get("num_image_tokens_per_patch", 256)
+        if len(image_indices) > num_tokens:
+            image_indices = image_indices[-num_tokens:]
             
         print(f"DEBUG: Selected {len(image_indices)} image indices (Global View). First: {image_indices[0]}, Last: {image_indices[-1]}")
         
@@ -775,15 +775,15 @@ class SimLingoVisualizer:
             
         # FIX: InternVL concatenates tokens as [Tile1, Tile2, ..., GlobalView].
         # To visualize the whole image properly, we should focus on the Global View tokens.
-        # These are the LAST 'num_patches' tokens in the image sequence.
-        num_patches = meta.get("num_patches", 256) # Default to 256 if not found, but usually passed in meta
+        # These are the LAST 'num_image_tokens_per_patch' tokens in the image sequence.
+        num_tokens = meta.get("num_image_tokens_per_patch", 256)
         
-        # If we have more tokens than num_patches, it means we have tiles. Take the last ones.
-        if len(image_indices) > num_patches:
-            print(f"[Ours] Selecting last {num_patches} tokens (Global View) from {len(image_indices)} total image tokens.")
-            image_indices = image_indices[-num_patches:]
+        # If we have more tokens than num_tokens, it means we have tiles. Take the last ones.
+        if len(image_indices) > num_tokens:
+            print(f"[Generic] Selecting last {num_tokens} tokens (Global View) from {len(image_indices)} total image tokens.")
+            image_indices = image_indices[-num_tokens:]
         else:
-            print(f"[Ours] Found {len(image_indices)} tokens (likely just Global View).")
+            print(f"[Generic] Found {len(image_indices)} tokens (likely just Global View).")
             
         # Extract scores
         # For LLM, B is usually 1 (unless batching multiple prompts).
