@@ -235,13 +235,15 @@ python -m experiment.vit_raw_attention \
 ```
 - `--payload_root`는 필수이며, 모델을 다시 돌리지 않습니다.
 
-## 압축/전송(참고)
-- 압축: `tar -czf <output.tgz> -C <input_parent_dir> <relative_path>`  
-  예: `tar -czf results.tgz -C /root/TML_UDD_Team experiment_outputs/simlingo_inference`
-- 압축 해제: `tar -xzf <input.tgz> -C <output_dir>`  
-  예: `tar -xzf results.tgz -C /root/TML_UDD_Team/experiment_outputs/simlingo_inference`
-- scp 다운로드(로컬에서 실행): `scp -P <PORT> -r <user>@<host>:<remote_path> <local_dest>`  
-  예: `scp -P 30002 -r root@202.39.40.153:/root/TML_UDD_Team/experiment_outputs/simlingo_inference/결과디렉토리압축파일 ~/home/컴퓨터이름/TML_UDD_Team/experiment_outputs/cloud_outputs/`
+## 압축/전송(참고, zip 기준)
+- 압축(현재 경로에 폴더가 있을 때): `zip -r <압축할파일이름>.zip <폴더이름>`  
+  예: `zip -r experiment_outputs.zip experiment_outputs` → `./experiment_outputs.zip` 생성
+
+- 압축 해제: `unzip <input.zip> -d <output_dir>`  
+  예: `unzip sim_outputs.zip -d ./experiment_outputs/` → `./experiment_outputs/`에 압축해제
+  
+- scp 다운로드(로컬에서 실행): `scp -P <PORT> <user>@<host>:<remote_path.zip> <local_dest_dir>/`  
+  예: `scp -P 30002 root@202.39.40.153:/root/TML_UDD_Team/experiment_outputs/sim_outputs.zip ~/home/컴퓨터이름/TML_UDD_Team/experiment_outputs/cloud_outputs/`
 
 ## 7) 기타
 - FlashAttention2 미설치 시 경고만 출력, 동작에는 문제 없음.
