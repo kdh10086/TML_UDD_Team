@@ -333,6 +333,13 @@ class SimLingoVisualizer:
             def hook(module, input, output):
                 # Debug: Inspect output structure for the first layer
                 if "layer_0" in name and "vision" in name:
+                    # Print Module Structure to find inner attention
+                    print(f"DEBUG: Hook {name} Module Type: {type(module)}")
+                    # Only print structure once
+                    if not hasattr(self, "_printed_structure"):
+                        print(f"DEBUG: Module Structure:\n{str(module)}")
+                        self._printed_structure = True
+                        
                     print(f"DEBUG: Hook {name} Output Type: {type(output)}")
                     if isinstance(output, tuple):
                         print(f"DEBUG: Hook {name} Output Length: {len(output)}")
@@ -386,9 +393,15 @@ class SimLingoVisualizer:
         # 1. Vision Encoder Hooks (for All methods)
         vision_model = self.model.vision_model.image_encoder.model.vision_model
         for i, layer in enumerate(vision_model.encoder.layers):
-            if hasattr(layer, "attn"): target = layer.attn
-            elif hasattr(layer, "attention"): target = layer.attention
-            else: continue
+            # Target the dropout layer after softmax (Standard way to get attention map in ViT)
+            # Structure: layer -> attn (InternAttention) -> attn_drop (Dropout)
+            if hasattr(layer, "attn") and hasattr(layer.attn, "attn_drop"):
+                target = layer.attn.attn_drop
+            elif hasattr(layer, "attention") and hasattr(layer.attention, "attn_drop"):
+                target = layer.attention.attn_drop
+            else:
+                print(f"WARNING: Vision layer {i} structure unknown, cannot find attn_drop. Hooking layer instead.")
+                target = layer
             
             # Generic needs grad, others don't (but we capture grad if we run generic)
             save_grad = (method in ["generic", "all", "ours"])
@@ -399,12 +412,208 @@ class SimLingoVisualizer:
             lm = self.model.language_model.model
             layers = getattr(lm, "layers", getattr(getattr(lm, "model", None), "layers", []))
             for i, layer in enumerate(layers):
-                # InternLM2 attention is usually in layer.self_attn
-                if hasattr(layer, "self_attn"): target = layer.self_attn
-                elif hasattr(layer, "attention"): target = layer.attention
-                else: continue
+                # Try to find attention dropout in LLM layer
+                # InternLM2: layer.attention.attn_drop? or layer.self_attn.dropout?
+                target = None
+                if hasattr(layer, "attention"):
+                    if hasattr(layer.attention, "attn_drop"): target = layer.attention.attn_drop
+                    elif hasattr(layer.attention, "dropout"): target = layer.attention.dropout
+                elif hasattr(layer, "self_attn"):
+                    if hasattr(layer.self_attn, "attn_drop"): target = layer.self_attn.attn_drop
+                    elif hasattr(layer.self_attn, "dropout"): target = layer.self_attn.dropout
+                    elif hasattr(layer.self_attn, "attention_dropout"): target = layer.self_attn.attention_dropout
+                
+                if target is None:
+                    # Fallback to layer and print structure to debug LLM
+                    target = layer
+                    if i == 0:
+                        print(f"DEBUG: LLM Layer 0 Structure (Cannot find dropout):\n{str(layer)}")
                 
                 self.hooks.append(target.register_forward_hook(get_hook(f"language_layer_{i}", save_grad=True)))
+
+    def _remove_hooks(self):
+        for h in self.hooks:
+            h.remove()
+        self.hooks = []
+
+    # --- Visualization Methods ---
+
+    def generate_visualization(
+        self, 
+        image_path: Path, 
+        output_dir: Path, 
+        methods: List[str] = ["generic", "rollout", "raw", "flow", "ours"],
+        metric: str = "curv_energy",
+        current_speed: float = 0.0,
+        explain_mode: str = "action" # "action" or "text"
+    ):
+        self.model.zero_grad()
+        driving_input, meta = self._prepare_driving_input(image_path, current_speed)
+        
+        # Register Hooks
+        run_generic_or_ours = "generic" in methods or "ours" in methods or "all" in methods
+        self._register_hooks(method="all" if run_generic_or_ours else "vision")
+
+        # Forward
+        outputs = self.model(driving_input)
+        pred_speed_wps, pred_route, _ = outputs
+        
+        # Debug: Check output gradients
+        print(f"Pred Route Requires Grad: {pred_route.requires_grad}")
+        if not pred_route.requires_grad:
+            print("CRITICAL WARNING: Model output does not require gradients. Check model configuration.")
+        
+        # Backward (if needed for Generic/Ours)
+        if run_generic_or_ours:
+            if explain_mode == "action":
+                metric_cfg = KINEMATIC_METRICS.get(metric, KINEMATIC_METRICS["curv_energy"])
+                if metric_cfg["source"] == "route":
+                    target = metric_cfg["fn"](pred_route)
+                else:
+                    target = metric_cfg["fn"](pred_speed_wps)
+            else:
+                # Text mode placeholder
+                target = pred_route.sum() * 0 
+                pass
+
+            if target.requires_grad:
+                self.model.zero_grad()
+                target.backward()
+                
+                # Debug: Check if gradients are flowing
+                print(f"Target Value: {target.item():.6f}, Requires Grad: {target.requires_grad}")
+                if self.grad_maps:
+                    first_key = list(self.grad_maps.keys())[0]
+                    last_key = list(self.grad_maps.keys())[-1]
+                    print(f"Grad Map [{first_key}] Mean: {self.grad_maps[first_key].float().mean():.6e}, Max: {self.grad_maps[first_key].max():.6e}")
+                    print(f"Grad Map [{last_key}] Mean: {self.grad_maps[last_key].float().mean():.6e}, Max: {self.grad_maps[last_key].max():.6e}")
+                else:
+                    print("WARNING: No gradients captured in grad_maps!")
+            else:
+                print("CRITICAL: Target does not require grad, cannot backward.")
+        
+        # Generate Visualizations
+        for method in methods:
+            # Create method-specific subdirectory
+            method_dir = output_dir / method
+            method_dir.mkdir(parents=True, exist_ok=True)
+            
+            if method == "generic":
+                heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps)
+            elif method == "rollout":
+                heatmap = self._get_rollout_relevance(self.attn_maps)
+            elif method == "flow":
+                heatmap = self._get_flow_relevance(self.attn_maps)
+            elif method == "raw":
+                heatmap = self._get_raw_attention(self.attn_maps)
+            elif method == "ours":
+                heatmap = self._get_ours_relevance(self.attn_maps, self.grad_maps, meta)
+            else:
+                continue
+            
+            # Debug: Print heatmap stats
+            if heatmap.numel() > 0:
+                print(f"[{method}] Heatmap Stats - Min: {heatmap.min():.4f}, Max: {heatmap.max():.4f}, Mean: {heatmap.mean():.4f}")
+            
+            overlay = self._create_heatmap_overlay(heatmap, image_path, meta)
+            if overlay is not None:
+                cv2.imwrite(str(method_dir / f"{image_path.stem}.png"), overlay)
+                
+        self._remove_hooks()
+
+    def _build_model(self):
+        print(f"Loading model from {self.ckpt_path}...")
+        
+        # Load Config
+        cfg = OmegaConf.load(self.cfg_path)
+        
+        # Load Model using the baseline class method (static or similar)
+        # We need to instantiate the model structure first
+        # Since SimLingoInferenceBaseline logic is complex, we reuse its structure if possible
+        # Or we just manually build it as in the original code.
+        
+        # Looking at original code (which I can't see fully now but I recall):
+        # It used SimLingoInferenceBaseline logic.
+        # Let's assume we can use the same logic as before.
+        
+        # Re-implementing based on what I saw in Step 236 and context
+        from experiment.simlingo_inference_baseline import SimLingoInferenceBaseline
+        
+        # We need to mock 'self' for SimLingoInferenceBaseline or use its methods?
+        # Actually, SimLingoVisualizer seems to have copied the logic or uses a helper.
+        # Let's look at what was there before.
+        # It was:
+        # model = hydra.utils.instantiate(cfg.model)
+        # checkpoint = torch.load(self.ckpt_path, map_location="cpu")
+        # state_dict = checkpoint["state_dict"]
+        # model.load_state_dict(state_dict, strict=False)
+        # model.to(self.device)
+        
+        # Let's try to reconstruct it robustly.
+        
+        model = hydra.utils.instantiate(cfg.model)
+        
+        # Load Checkpoint
+        if self.ckpt_path.exists():
+            checkpoint = torch.load(self.ckpt_path, map_location="cpu")
+            if "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            else:
+                state_dict = checkpoint
+                
+            # Fix state dict keys if needed (e.g. remove 'model.' prefix if present and model expects it, or vice versa)
+            # Usually SimLingo checkpoints are standard.
+            keys = model.load_state_dict(state_dict, strict=False)
+            print(f"Model loaded. Missing keys: {len(keys.missing_keys)}, Unexpected keys: {len(keys.unexpected_keys)}")
+        else:
+            print(f"WARNING: Checkpoint {self.ckpt_path} not found!")
+
+        model.to(self.device)
+        
+        # Enable gradients for explanation
+        for param in model.parameters():
+            param.requires_grad = True
+            
+        # Verify requires_grad
+        if list(model.parameters()):
+            print(f"Model Parameter requires_grad check: {next(model.parameters()).requires_grad}")
+            
+        # Configure model to output attentions
+        # Handle potential attribute errors if model structure varies
+        if hasattr(model, "language_model") and hasattr(model.language_model, "model"):
+            model.language_model.model.config.output_attentions = True
+            
+            # Force Eager Attention
+            if hasattr(model.language_model.model.config, "attn_implementation"):
+                model.language_model.model.config.attn_implementation = "eager"
+            if hasattr(model.language_model.model.config, "_attn_implementation"):
+                model.language_model.model.config._attn_implementation = "eager"
+                
+            # Disable gradient checkpointing
+            model.language_model.model.config.gradient_checkpointing = False
+            if hasattr(model.language_model.model, "gradient_checkpointing_disable"):
+                model.language_model.model.gradient_checkpointing_disable()
+
+        if hasattr(model, "vision_model") and hasattr(model.vision_model, "image_encoder") and hasattr(model.vision_model.image_encoder, "model"):
+            model.vision_model.image_encoder.model.config.output_attentions = True
+            
+            # Force Eager Attention
+            if hasattr(model.vision_model.image_encoder.model.config, "attn_implementation"):
+                model.vision_model.image_encoder.model.config.attn_implementation = "eager"
+            if hasattr(model.vision_model.image_encoder.model.config, "_attn_implementation"):
+                model.vision_model.image_encoder.model.config._attn_implementation = "eager"
+                
+            # Disable gradient checkpointing
+            model.vision_model.image_encoder.model.config.gradient_checkpointing = False
+            if hasattr(model.vision_model.image_encoder.model, "gradient_checkpointing_disable"):
+                model.vision_model.image_encoder.model.gradient_checkpointing_disable()
+        
+        print("Forcing Eager Attention Implementation to capture attention gradients...")
+        
+        # Force model to train mode to ensure gradients are tracked
+        model.eval() 
+
+        return model
 
     def _remove_hooks(self):
         for h in self.hooks:
