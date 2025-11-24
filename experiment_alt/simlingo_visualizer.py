@@ -693,6 +693,7 @@ class SimLingoVisualizer:
         
         image_indices = meta.get("image_token_indices", [])
         if not image_indices:
+            print("DEBUG: No image_token_indices found in meta!")
             return torch.zeros(1)
             
         # Select Global View tokens (last num_patches)
@@ -700,6 +701,30 @@ class SimLingoVisualizer:
         if len(image_indices) > num_patches:
             image_indices = image_indices[-num_patches:]
             
+        print(f"DEBUG: Selected {len(image_indices)} image indices (Global View). First: {image_indices[0]}, Last: {image_indices[-1]}")
+        
+        # Check gradients before loop
+        print(f"DEBUG: Checking gradients for {len(sorted_keys)} layers...")
+        
+        for name in sorted_keys:
+            attn = lm_maps[name].float()
+            grad = grad_maps.get(name, torch.zeros_like(attn)).float()
+            
+            if grad.abs().sum() == 0:
+                 # Only print for the first few to avoid spam, or if it's the last layer
+                 if name == sorted_keys[-1]:
+                     print(f"DEBUG: Layer {name} has ZERO gradient!")
+            
+            # Chefer Rule: E_h [ (A * G)^+ ]
+            cam = attn * grad
+            cam = cam.clamp(min=0).mean(dim=1) # [B, S, S]
+            
+            # R = R + CAM * R
+            R = R + torch.bmm(cam, R)
+            
+        print(f"DEBUG: Final R Matrix Stats - Mean: {R.mean():.6e}, Max: {R.max():.6e}")
+        print(f"DEBUG: R[0, target_idx, image_indices] Stats - Mean: {R[0, target_idx, image_indices].mean():.6e}")
+
         scores = R[0, target_idx, image_indices]
         return scores
 
