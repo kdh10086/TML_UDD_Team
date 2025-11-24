@@ -201,9 +201,8 @@ class GenericAttentionActionVisualizer:
 
                 with open(pt_log_path, "a") as log_file:
                     for tag, payload_path in tqdm(items_to_process, desc=f"GenericAction ({scene_dir.name if scene_dir else '?'})", unit="img"):
-                        # Log the PT file usage
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        log_file.write(f"[{timestamp}] Processed: {payload_path.resolve()}\n")
+                        # Log the PT file usage (simple format: image_name - pt_filename)
+                        log_file.write(f"{tag} - {payload_path.name}\n")
                         
                         payload = torch.load(payload_path, map_location=self.device)
                         image_path = self._resolve_image_path(payload, scene_dir)

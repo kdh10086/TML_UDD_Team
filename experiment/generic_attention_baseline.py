@@ -217,9 +217,8 @@ class GenericAttentionTextVisualizer:
                     print(f"Warning: Image not found for payload {tag}. Skipping.")
                     continue
                 
-                # Log the PT file usage
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                log_file.write(f"[{timestamp}] Processed: {pt_path.resolve()}\n")
+                # Log the PT file usage (simple format: image_name - pt_filename)
+                log_file.write(f"{tag} - {pt_path.name}\n")
                 
                 self._process_single_image(
                     image_path, pt_path, final_dir, suffix, route_dir, speed_dir, raw_dir

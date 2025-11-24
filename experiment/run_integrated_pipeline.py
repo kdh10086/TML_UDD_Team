@@ -181,24 +181,16 @@ def main():
                 print(f"[Pipeline]   Method: {name}")
                 
                 method_dir = base_output_dir / name
-                pt_dir = method_dir / "pt"
                 raw_dir = method_dir / "raw_heatmap"
                 final_dir = method_dir / "final_heatmap"
                 
-                pt_dir.mkdir(parents=True, exist_ok=True)
                 raw_dir.mkdir(parents=True, exist_ok=True)
                 final_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Copy PT files for this batch to the method's PT dir
-                for img_file in batch_files:
-                    pt_file = pt_source / f"{img_file.stem}.pt"
-                    if pt_file.exists():
-                        shutil.copy2(pt_file, pt_dir / pt_file.name)
-                
-                # Update runner's payload_root and re-index
-                runner.payload_root = pt_dir
+                # Point runner directly to source PT directory (no copying)
+                runner.payload_root = pt_source
                 if hasattr(runner, "_index_payloads"):
-                    runner._payload_index = runner._index_payloads(pt_dir)
+                    runner._payload_index = runner._index_payloads(pt_source)
                 
                 # Run generation for this batch
                 runner.generate_scene_heatmaps(
@@ -208,10 +200,6 @@ def main():
                     raw_output_dir=raw_dir,
                     target_files=batch_files
                 )
-                
-                # Flattening logic removed as visualizers now handle output structure (final/raw/pt_log.txt)
-                # flatten_and_rename(final_dir, name)
-                # flatten_and_rename(raw_dir, "raw")
                 
                 # Explicit cleanup
                 gc.collect()
