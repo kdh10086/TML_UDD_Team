@@ -421,8 +421,11 @@ class SimLingoVisualizer:
             layers = []
             if hasattr(lm, "layers"):
                 layers = lm.layers
-            elif hasattr(lm, "model") and hasattr(lm.model, "layers"):
-                layers = lm.model.layers
+            elif hasattr(lm, "model"):
+                if hasattr(lm.model, "layers"):
+                    layers = lm.model.layers
+                elif hasattr(lm.model, "model") and hasattr(lm.model.model, "layers"):
+                    layers = lm.model.model.layers
             elif hasattr(lm, "h"):
                 layers = lm.h
             elif hasattr(lm, "block"):
@@ -431,15 +434,6 @@ class SimLingoVisualizer:
                 layers = lm.base_model.model.layers
                 
             print(f"DEBUG: Found {len(layers)} LLM layers for hooking.")
-            
-            if len(layers) == 0:
-                print(f"DEBUG: LLM Type: {type(lm)}")
-                # print(f"DEBUG: LLM Dir: {dir(lm)}") # Too verbose, maybe just check keys
-                if hasattr(lm, "model"):
-                    print(f"DEBUG: LLM.model Type: {type(lm.model)}")
-                    print(f"DEBUG: LLM.model Keys: {lm.model.__dict__.keys()}")
-                else:
-                    print("DEBUG: LLM has no .model attribute")
             
             for i, layer in enumerate(layers):
                 if i == 0:
