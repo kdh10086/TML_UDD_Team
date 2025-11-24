@@ -14,6 +14,11 @@ from typing import List, Dict, Any
 import torch
 from tqdm import tqdm
 
+# Add project root to sys.path to allow imports from experiment module
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
 # Import runners directly
 from experiment.simlingo_inference_baseline import SimLingoInferenceBaseline
 from experiment.ours import GenericAttentionActionVisualizer

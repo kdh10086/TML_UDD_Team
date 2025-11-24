@@ -82,6 +82,7 @@ git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD
 `git config --global credential.helper store` 설정으로 토큰 캐싱까지 완료합니다. 남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
 
 ## 3) 필수 시스템 패키지(우분투)
+> **Note**: `tools/cloud_bootstrap.sh`가 성공했다면 이 단계는 자동으로 수행되었으므로 건너뛰세요. 실패했을 경우에만 수동으로 진행합니다.
 ```bash
 # sudo가 없으면 sudo를 빼고 실행
 apt-get update
@@ -107,6 +108,7 @@ git config --global user.email "<your email>"
 ```
 
 ## 4) 체크포인트 및 샘플 데이터 다운로드
+> **Note**: `tools/cloud_bootstrap.sh`가 성공했다면 이 단계는 자동으로 수행되었으므로 건너뛰세요. 실패했을 경우에만 수동으로 진행합니다.
 ### SimLingo 체크포인트(HuggingFace)
 ```bash
 cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
@@ -233,6 +235,15 @@ TEXT_TOKEN_STRATEGIES = ("max", "last", "index")
   --alpha 0.5
 ```
 - `--payload_root`는 선택 사항이며, 생략 시 `--scene_dir/pt`를 자동으로 탐색합니다.
+
+## 6-3) 통합 파이프라인 실행 (권장)
+Inference(Action/Text)와 5가지 Visualization을 한 번에 실행하며, 100장 단위 배치로 처리합니다.
+```bash
+# 통합 파이프라인 실행 (배치 크기 100)
+python experiment/run_integrated_pipeline.py data/sample_small/01 --batch_size 100
+```
+- 결과는 `experiment_outputs/integrated/<ScenarioName>_<DateTime>/` 아래에 메소드별로 정리됩니다.
+- 중간에 중단되더라도 처리된 배치의 결과는 저장됩니다.
 
 ## 압축/전송(참고, zip 기준)
 - 압축(현재 경로에 폴더가 있을 때): `zip -r <압축할파일이름>.zip <폴더이름>`  
