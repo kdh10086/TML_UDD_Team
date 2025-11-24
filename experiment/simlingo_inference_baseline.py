@@ -1477,10 +1477,11 @@ class SimLingoInferenceBaseline:
                     # But for teacher forcing, we want the FULL conversation.
                     
                     val = conv_part["content"]
-                    if val and "Waypoints:" in val: # It has our response
-                         template.append_message(template.roles[1], val)
-                    else:
+                    if val == "Waypoints:": # Empty response case -> Start generation
                          template.append_message(template.roles[1], None)
+                    else:
+                         # Teacher forcing case -> Force the content
+                         template.append_message(template.roles[1], val)
 
                 elif conv_part["role"] == "user":
                     if conv_part_idx == 0 and "<image>" not in conv_part["content"]:
