@@ -45,31 +45,23 @@ def chunk_list(data: List[Any], chunk_size: int):
         yield data[i : i + chunk_size]
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Sim-Lingo Integrated Pipeline (Batch)")
-    parser.add_argument("scenario_path", type=Path, help="Path to the scenario directory")
-    parser.add_argument("--batch_size", type=int, default=100, help="Number of frames per batch")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to use")
-    args = parser.parse_args()
-
-    scenario_path = args.scenario_path.resolve()
-    if not scenario_path.exists():
-        print(f"Error: Scenario path {scenario_path} does not exist.")
-        sys.exit(1)
-
+def process_scenario(scenario_path: Path, batch_size: int, device: str, base_output_root: Path):
+    """Process a single scenario through the integrated pipeline."""
     scenario_name = scenario_path.name
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_output_dir = Path("experiment_outputs/integrated") / f"{scenario_name}_{timestamp}"
+    base_output_dir = base_output_root / f"{scenario_name}_{timestamp}"
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"\n{'='*80}")
     print(f"[Pipeline] Starting batch pipeline for {scenario_name}")
     print(f"[Pipeline] Output directory: {base_output_dir}")
+    print(f"{'='*80}\n")
 
     # 1. Initialize Inference Runner (Shared)
     # We will toggle explain_mode between 'action' and 'text'
     print("[Pipeline] Initializing Inference Model...")
     inference_runner = SimLingoInferenceBaseline(
-        device=args.device,
+        device=device,
         target_mode="auto",
         kinematic_metric="curv_energy",
         image_size=224,
@@ -79,101 +71,106 @@ def main():
         skip_backward=False
     )
 
-    # Prepare persistent inference output directories
+    # Pre-create PT directories for inference
     inference_action_dir = base_output_dir / "inference_action"
     inference_text_dir = base_output_dir / "inference_text"
     
+    action_pt_dir = inference_action_dir / f"{scenario_name}_action" / "pt"
+    text_pt_dir = inference_text_dir / f"{scenario_name}_text" / "pt"
+    
+    action_pt_dir.mkdir(parents=True, exist_ok=True)
+    text_pt_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"[Pipeline] Pre-creating PT directories: {action_pt_dir}, {text_pt_dir}")
+
     # 2. Initialize Visualizers
-    # They need payload_root. Since we generate payloads on the fly, we point them to the
-    # expected location of PT files.
-    # SimLingo creates subdirs: output_dir / f"{scene_name}_{mode}" / "pt"
-    
-    # We need to know the exact path SimLingo will use.
-    # It uses `_prepare_output_subdir` which does: output_dir / f"{scene_dir.name}_{suffix}"
-    # So:
-    pt_action_root = inference_action_dir / f"{scenario_name}_action" / "pt"
-    pt_text_root = inference_text_dir / f"{scenario_name}_text" / "pt"
-    
-    # Ensure these exist (or at least the parent) so visualizers don't crash on init if they check
-    # Visualizers check for existence of payload_root in __init__
-    print(f"[Pipeline] Pre-creating PT directories: {pt_action_root}, {pt_text_root}")
-    pt_action_root.mkdir(parents=True, exist_ok=True)
-    pt_text_root.mkdir(parents=True, exist_ok=True)
-    
     print("[Pipeline] Initializing Visualizers...")
-    # Group visualizers by mode dependency
+    
     action_visualizers = [
         {
             "name": "ours",
             "runner": GenericAttentionActionVisualizer(
-                device=args.device,
+                device=device,
                 colormap="JET",
                 alpha=0.5,
-                payload_root=pt_action_root # Will be populated
+                trajectory_overlay_root=None,
+                payload_root=action_pt_dir
             ),
-            "pt_source": pt_action_root
+            "pt_source": action_pt_dir,
         },
+    ]
+
+    vit_visualizers = [
         {
             "name": "vit_rollout",
             "runner": VisionAttentionRollout(
-                device=args.device,
+                device=device,
                 start_layer=0,
                 residual_alpha=0.5,
                 colormap="JET",
                 alpha=0.5,
-                payload_root=pt_action_root # Use action PTs
+                trajectory_overlay_root=None,
+                payload_root=action_pt_dir
             ),
-            "pt_source": pt_action_root
+            "pt_source": action_pt_dir,
         },
         {
             "name": "vit_flow",
             "runner": VisionAttentionFlow(
-                device=args.device,
+                device=device,
                 discard_ratio=0.9,
                 residual_alpha=0.5,
                 colormap="JET",
                 alpha=0.5,
-                payload_root=pt_action_root
+                trajectory_overlay_root=None,
+                payload_root=action_pt_dir
             ),
-            "pt_source": pt_action_root
+            "pt_source": action_pt_dir,
         },
         {
             "name": "vit_raw",
             "runner": VisionRawAttention(
-                device=args.device,
+                device=device,
                 layer_index=-1,
                 head_strategy="mean",
                 colormap="JET",
                 alpha=0.5,
-                payload_root=pt_action_root
+                trajectory_overlay_root=None,
+                payload_root=action_pt_dir
             ),
-            "pt_source": pt_action_root
-        }
+            "pt_source": action_pt_dir,
+        },
     ]
 
     text_visualizers = [
         {
             "name": "generic_text",
             "runner": GenericAttentionTextVisualizer(
-                device=args.device,
+                device=device,
+                text_token_strategy="max",
+                text_token_index=-1,
                 colormap="JET",
                 alpha=0.5,
-                payload_root=pt_text_root
+                trajectory_overlay_root=None,
+                payload_root=text_pt_dir
             ),
-            "pt_source": pt_text_root
-        }
+            "pt_source": text_pt_dir,
+        },
     ]
 
-    # 3. Batch Loop
-    all_images = get_image_paths(scenario_path)
-    print(f"[Pipeline] Found {len(all_images)} images. Batch size: {args.batch_size}")
+    # 3. Get image paths
+    image_paths = get_image_paths(scenario_path)
+    print(f"[Pipeline] Found {len(image_paths)} images. Batch size: {batch_size}\n")
 
-    for batch_idx, batch_files in enumerate(chunk_list(all_images, args.batch_size)):
-        print(f"\n[Pipeline] === Processing Batch {batch_idx + 1} ({len(batch_files)} frames) ===")
+    # 4. Process batches
+    batches = list(chunk_list(image_paths, batch_size))
+    
+    for batch_idx, batch_files in enumerate(batches):
+        print(f"[Pipeline] === Processing Batch {batch_idx + 1} ({len(batch_files)} frames) ===")
         
         # Helper function to run visualizers
-        def run_visualizers_for_batch(viz_list, batch_files):
-            for viz in viz_list:
+        def run_visualizers_for_batch(visualizers: List[Dict], batch_files: List[Path]):
+            for viz in visualizers:
                 name = viz["name"]
                 runner = viz["runner"]
                 pt_source = viz["pt_source"]
@@ -220,10 +217,12 @@ def main():
         pt_action_source = actual_action_dir / "pt"
         for viz in action_visualizers:
             viz["pt_source"] = pt_action_source
+        for viz in vit_visualizers:
+            viz["pt_source"] = pt_action_source
 
         # --- Visualizations (Action) ---
         print(f"[Pipeline] Running Visualizations (Action-dependent)... PT Source: {pt_action_source}")
-        run_visualizers_for_batch(action_visualizers, batch_files)
+        run_visualizers_for_batch(action_visualizers + vit_visualizers, batch_files)
         
         # --- Inference Text ---
         print("[Pipeline] Running Inference (Text)...")
@@ -250,15 +249,54 @@ def main():
             print(f"[Pipeline]   Deleted: {pt_text_source}")
 
     print(f"\n[Pipeline] Done! Results saved to {base_output_dir}")
-    
-    # Cleanup persistent inference dirs if desired?
-    # User might want to inspect them. Let's keep them or delete?
-    # "Organize all generated outputs... into a structured directory hierarchy under experiment_outputs/integrated/"
-    # The user didn't explicitly ask to delete intermediate inference outputs, but they are redundant if copied.
-    # I'll leave them for debugging or delete them to save space.
-    # Given OOM concerns, maybe delete? But disk space is usually cheap.
-    # I'll leave them but print a message.
     print(f"[Pipeline] Intermediate inference outputs kept in {inference_action_dir} and {inference_text_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sim-Lingo Integrated Pipeline (Batch)")
+    parser.add_argument("input_path", type=Path, help="Path to scenario directory or dataset directory")
+    parser.add_argument("--batch_size", type=int, default=100, help="Number of frames per batch")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use")
+    args = parser.parse_args()
+
+    input_path = args.input_path.resolve()
+    if not input_path.exists():
+        print(f"Error: Input path {input_path} does not exist.")
+        sys.exit(1)
+
+    base_output_root = Path("experiment_outputs/integrated")
+    base_output_root.mkdir(parents=True, exist_ok=True)
+
+    # Check if input_path is a dataset directory (contains subdirectories) or a single scenario
+    # Heuristic: if it contains subdirectories that look like scenarios, process all
+    # Otherwise, treat it as a single scenario
+    
+    potential_scenarios = []
+    if input_path.is_dir():
+        # Check for subdirectories that could be scenarios
+        subdirs = [d for d in input_path.iterdir() if d.is_dir()]
+        
+        # Try to detect if this is a dataset directory:
+        # If subdirectories contain image folders (video_garmin, images, etc.), they are scenarios
+        for subdir in subdirs:
+            # Check if subdir has image folders
+            if (subdir / "video_garmin").exists() or (subdir / "images").exists() or (subdir / "input_images").exists():
+                potential_scenarios.append(subdir)
+        
+        # If we found scenarios, process all of them
+        if potential_scenarios:
+            print(f"[Pipeline] Detected dataset directory with {len(potential_scenarios)} scenarios")
+            print(f"[Pipeline] Scenarios: {[s.name for s in potential_scenarios]}\n")
+            
+            for scenario in sorted(potential_scenarios):
+                process_scenario(scenario, args.batch_size, args.device, base_output_root)
+        else:
+            # Treat input_path itself as a scenario
+            print(f"[Pipeline] Processing single scenario: {input_path.name}")
+            process_scenario(input_path, args.batch_size, args.device, base_output_root)
+    else:
+        print(f"Error: Input path {input_path} is not a directory.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
