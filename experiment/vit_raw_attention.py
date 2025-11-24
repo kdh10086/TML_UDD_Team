@@ -305,6 +305,7 @@ class VisionRawAttention:
         scores = token_scores.view(num_views, 1, grid, grid).mean(dim=0)
         H = int(meta["original_height"])
         W = int(meta["original_width"])
+        scores = scores.unsqueeze(0) # [1, 1, grid, grid]
         heatmap = F.interpolate(scores, size=(H, W), mode="bilinear", align_corners=False)
         return heatmap.squeeze(0).squeeze(0)
 
