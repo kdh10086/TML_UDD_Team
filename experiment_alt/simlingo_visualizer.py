@@ -672,7 +672,12 @@ class SimLingoVisualizer:
         # Select Global View tokens (last num_image_tokens_per_patch)
         num_tokens = meta.get("num_image_tokens_per_patch", 256)
         if len(image_indices) > num_tokens:
-            image_indices = image_indices[-num_tokens:]
+            # Use Tile tokens for High-Res Heatmap (Exclude Global View at the end)
+            image_indices = image_indices[:-num_tokens]
+            print(f"[Generic] Using {len(image_indices)} Tile tokens for High-Res Heatmap.")
+        else:
+            # Only Global View exists
+            pass
             
         scores = R[0, target_idx, image_indices]
         return scores
@@ -738,8 +743,16 @@ class SimLingoVisualizer:
         target_idx = torch.argmax(query_grad_mag).item()
         
         # Extract scores
-        # For LLM, B is usually 1 (unless batching multiple prompts).
-        # We take batch 0.
+        num_tokens = meta.get("num_image_tokens_per_patch", 256)
+        
+        if len(image_indices) > num_tokens:
+            # Use Tile tokens for High-Res Heatmap (Exclude Global View at the end)
+            image_indices = image_indices[:-num_tokens]
+            print(f"[Ours] Using {len(image_indices)} Tile tokens for High-Res Heatmap.")
+        else:
+            # Only Global View exists
+            pass
+            
         scores = R[0, target_idx, image_indices] # [Num_Image_Tokens]
         
         return scores
@@ -801,58 +814,78 @@ class SimLingoVisualizer:
     def _create_heatmap_overlay(self, heatmap, image_path, meta):
         if heatmap.numel() == 0: return None
         
-        n_patches = heatmap.shape[0]
         heatmap = heatmap.float().detach()
+        n_tokens = heatmap.shape[0]
+        chunk_size = meta.get("num_image_tokens_per_patch", 256)
         
         orig_h, orig_w = meta.get("original_height", 224), meta.get("original_width", 224)
         
-        # Determine grid dimensions (h_grid, w_grid)
-        # We want h_grid * w_grid = n_patches
-        # And h_grid / w_grid approx orig_h / orig_w
-        
-        target_ratio = orig_h / orig_w
-        best_w = 1
-        min_error = float('inf')
-        
-        # Find factor pair (h, w) that minimizes aspect ratio error
-        for w in range(1, int(np.sqrt(n_patches)) + 1):
-            if n_patches % w == 0:
-                # Pair (w, h)
-                h = n_patches // w
-                
-                # Check ratio for (h, w)
-                current_ratio = h / w
-                error = abs(current_ratio - target_ratio)
-                if error < min_error:
-                    min_error = error
-                    best_w = w
-                    best_h = h
-                    
-                # Check ratio for (w, h) - swapped
-                current_ratio_swapped = w / h
-                error_swapped = abs(current_ratio_swapped - target_ratio)
-                if error_swapped < min_error:
-                    min_error = error_swapped
-                    best_w = h
-                    best_h = w
-                    
-        h_grid, w_grid = best_h, best_w
-        
-        try:
-            heatmap_2d = heatmap.view(h_grid, w_grid).cpu().numpy()
-        except Exception as e:
-            print(f"WARNING: Failed to reshape heatmap of size {n_patches} to ({h_grid}, {w_grid}). Error: {e}")
-            # Fallback to 1D -> Resize (will look like lines but better than crash)
-            heatmap_2d = heatmap.view(1, n_patches).cpu().numpy()
+        # Helper to process a heatmap chunk
+        def process_chunk(chunk, is_global=False):
+            n = chunk.shape[0]
+            if n == 0: return np.zeros((orig_h, orig_w), dtype=np.float32)
+            
+            # Determine grid dimensions
+            if is_global:
+                # Global view is usually square
+                grid_size = int(np.sqrt(n))
+                if grid_size * grid_size == n:
+                    h_grid, w_grid = grid_size, grid_size
+                else:
+                    # Fallback for non-square global view?
+                    h_grid, w_grid = 1, n
+            else:
+                # Tiles: Use Aspect Ratio Matching
+                target_ratio = orig_h / orig_w
+                best_w = 1
+                min_error = float('inf')
+                for w in range(1, int(np.sqrt(n)) + 1):
+                    if n % w == 0:
+                        h = n // w
+                        # Check (h, w)
+                        err1 = abs((h / w) - target_ratio)
+                        if err1 < min_error:
+                            min_error = err1
+                            best_w = w
+                            best_h = h
+                        # Check (w, h)
+                        err2 = abs((w / h) - target_ratio)
+                        if err2 < min_error:
+                            min_error = err2
+                            best_w = h
+                            best_h = w
+                h_grid, w_grid = best_h, best_w
+
+            try:
+                map_2d = chunk.view(h_grid, w_grid).cpu().numpy()
+                map_resized = cv2.resize(map_2d, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+                return map_resized
+            except Exception as e:
+                print(f"WARNING: Reshape failed: {e}")
+                return np.zeros((orig_h, orig_w), dtype=np.float32)
+
+        # Split into Tiles and Global if applicable
+        if n_tokens > chunk_size:
+            # We have Tiles + Global
+            tiles_heatmap = heatmap[:-chunk_size]
+            global_heatmap = heatmap[-chunk_size:]
+            
+            map_tiles = process_chunk(tiles_heatmap, is_global=False)
+            map_global = process_chunk(global_heatmap, is_global=True)
+            
+            # Combine: Sum them up (Model sees both)
+            combined_map = map_tiles + map_global
+        else:
+            # Only Global (or single patch)
+            combined_map = process_chunk(heatmap, is_global=True)
             
         # Robust Normalization
-        if heatmap_2d.max() == heatmap_2d.min():
-            heatmap_norm = np.zeros_like(heatmap_2d, dtype=np.uint8)
+        if combined_map.max() == combined_map.min():
+            heatmap_norm = np.zeros_like(combined_map, dtype=np.uint8)
         else:
-            heatmap_norm = cv2.normalize(heatmap_2d, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            heatmap_norm = cv2.normalize(combined_map, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
         
-        heatmap_img = cv2.resize(heatmap_norm, (orig_w, orig_h))
-        heatmap_img = cv2.applyColorMap(heatmap_img, cv2.COLORMAP_JET)
+        heatmap_img = cv2.applyColorMap(heatmap_norm, cv2.COLORMAP_JET)
         
         orig_img = cv2.imread(str(image_path))
         if orig_img is None: return None
