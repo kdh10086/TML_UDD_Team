@@ -134,12 +134,22 @@ class GenericAttentionTextVisualizer:
         # Robust image directory search
         candidates = [scene_dir / "input_images", scene_dir / "video_garmin", scene_dir / "images", scene_dir]
         image_root = scene_dir
+        print(f"[DEBUG] Searching for images in candidates: {candidates}")
         for cand in candidates:
+            print(f"[DEBUG] Checking candidate: {cand}")
             if cand.exists() and cand.is_dir():
                 # Check if it has images
-                if any(p.suffix.lower() in {".png", ".jpg", ".jpeg"} for p in cand.iterdir()):
+                has_images = False
+                for p in cand.iterdir():
+                    if p.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                        has_images = True
+                        break
+                print(f"[DEBUG] Candidate {cand} exists. Has images? {has_images}")
+                if has_images:
                     image_root = cand
                     break
+            else:
+                print(f"[DEBUG] Candidate {cand} does not exist or is not a directory.")
         
         print(f"Using image root: {image_root}")
         route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
