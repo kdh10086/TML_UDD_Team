@@ -147,6 +147,8 @@ class SimLingoVisualizer:
         )
         
         self.model = self._build_model()
+        self._force_enable_attentions(self.model.language_model.model)
+        self._force_enable_attentions(self.model.vision_model.image_encoder.model)
         self._speed_cache: Dict[str, Dict[str, float]] = {}
 
     def _compute_num_image_tokens(self, encoder_variant: str, image_size_override: Optional[int] = None) -> int:
@@ -415,51 +417,68 @@ class SimLingoVisualizer:
 
         # 2. Language Model Hooks (For Ours/Generic if requested)
         if method in ["generic", "all", "ours"]:
-            lm = self.model.language_model.model
-            
-            # Robust Layer Discovery
-            layers = []
-            if hasattr(lm, "layers"):
-                layers = lm.layers
-            elif hasattr(lm, "model"):
-                if hasattr(lm.model, "layers"):
-                    layers = lm.model.layers
-                elif hasattr(lm.model, "model") and hasattr(lm.model.model, "layers"):
-                    layers = lm.model.model.layers
-            elif hasattr(lm, "h"):
-                layers = lm.h
-            elif hasattr(lm, "block"):
-                layers = lm.block
-            elif hasattr(lm, "base_model") and hasattr(lm.base_model, "model") and hasattr(lm.base_model.model, "layers"):
-                layers = lm.base_model.model.layers
-                
+            lm_root = getattr(self.model.language_model, "model", None)
+
+            def _find_layers(root: Optional[torch.nn.Module]) -> List[torch.nn.Module]:
+                if root is None:
+                    return []
+                visited = set()
+                queue: List[torch.nn.Module] = [root]
+                while queue:
+                    module = queue.pop(0)
+                    if id(module) in visited:
+                        continue
+                    visited.add(id(module))
+                    direct = getattr(module, "layers", None)
+                    if isinstance(direct, (list, torch.nn.ModuleList)) and len(direct) > 0:
+                        return list(direct)
+                    alt = getattr(module, "layer", None)
+                    if isinstance(alt, (list, torch.nn.ModuleList)) and len(alt) > 0:
+                        return list(alt)
+                    encoder = getattr(module, "encoder", None)
+                    if isinstance(encoder, torch.nn.Module):
+                        enc_layers = getattr(encoder, "layers", None)
+                        if isinstance(enc_layers, (list, torch.nn.ModuleList)) and len(enc_layers) > 0:
+                            return list(enc_layers)
+                        alt_enc_layers = getattr(encoder, "layer", None)
+                        if isinstance(alt_enc_layers, (list, torch.nn.ModuleList)) and len(alt_enc_layers) > 0:
+                            return list(alt_enc_layers)
+                        queue.append(encoder)
+                    for attr in ("model", "base_model"):
+                        child = getattr(module, attr, None)
+                        if isinstance(child, torch.nn.Module):
+                            queue.append(child)
+                return []
+
+            layers = _find_layers(lm_root)
             print(f"DEBUG: Found {len(layers)} LLM layers for hooking.")
-            
+
             for i, layer in enumerate(layers):
                 if i == 0:
                     print(f"DEBUG: Hooking LLM layer {i}")
-                    
-                # Try to find attention dropout in LLM layer
-                # InternLM2: layer.attention.attn_drop? or layer.self_attn.dropout?
+
                 target = None
                 if hasattr(layer, "attention"):
-                    if hasattr(layer.attention, "attn_drop"): target = layer.attention.attn_drop
-                    elif hasattr(layer.attention, "dropout"): target = layer.attention.dropout
-                elif hasattr(layer, "self_attn"):
-                    if hasattr(layer.self_attn, "attn_drop"): target = layer.self_attn.attn_drop
-                    elif hasattr(layer.self_attn, "dropout"): target = layer.self_attn.dropout
-                    elif hasattr(layer.self_attn, "attention_dropout"): target = layer.self_attn.attention_dropout
-                
-                # Check if target is a module (it might be a float config value)
+                    if hasattr(layer.attention, "attn_drop"):
+                        target = layer.attention.attn_drop
+                    elif hasattr(layer.attention, "dropout"):
+                        target = layer.attention.dropout
+                if target is None and hasattr(layer, "self_attn"):
+                    if hasattr(layer.self_attn, "attn_drop"):
+                        target = layer.self_attn.attn_drop
+                    elif hasattr(layer.self_attn, "dropout"):
+                        target = layer.self_attn.dropout
+                    elif hasattr(layer.self_attn, "attention_dropout"):
+                        target = layer.self_attn.attention_dropout
+
                 if target is not None and not isinstance(target, torch.nn.Module):
                     target = None
 
                 if target is None:
-                    # Fallback to layer and print structure to debug LLM
                     target = layer
                     if i == 0:
                         print(f"DEBUG: LLM Layer 0 Structure (Cannot find dropout):\n{str(layer)}")
-                
+
                 self.hooks.append(target.register_forward_hook(get_hook(f"language_layer_{i}", save_grad=True)))
 
     def _remove_hooks(self):
@@ -483,6 +502,9 @@ class SimLingoVisualizer:
         
         # Register Hooks
         run_generic_or_ours = "generic" in methods or "ours" in methods or "all" in methods
+        # reset captured maps each run
+        self.attn_maps = {}
+        self.grad_maps = {}
         self._register_hooks(method="all" if run_generic_or_ours else "vision")
 
         # Forward
@@ -651,6 +673,28 @@ class SimLingoVisualizer:
         print("Forcing Eager Attention Implementation to capture attention gradients...")
         
         return model
+
+    @staticmethod
+    def _force_enable_attentions(module: torch.nn.Module) -> None:
+        """Recursively enable attention/hidden-state outputs (handles wrappers/PEFT)."""
+        visited = set()
+
+        def _walk(obj: torch.nn.Module) -> None:
+            if obj is None or id(obj) in visited:
+                return
+            visited.add(id(obj))
+            cfg = getattr(obj, "config", None)
+            if cfg is not None:
+                if hasattr(cfg, "output_attentions"):
+                    cfg.output_attentions = True
+                if hasattr(cfg, "output_hidden_states"):
+                    cfg.output_hidden_states = True
+            for attr in ("model", "base_model", "vision_model", "encoder"):
+                child = getattr(obj, attr, None)
+                if isinstance(child, torch.nn.Module):
+                    _walk(child)
+
+        _walk(module)
 
     def _remove_hooks(self):
         for h in self.hooks:
