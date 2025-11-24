@@ -180,6 +180,29 @@ python -m experiment.vit_attention_flow \
 ```
 - 캐시가 없으면 실행 불가(모델 재실행 없음). `.pt`에 비전 어텐션이 포함돼 있는지 먼저 확인하세요.
 
+## 6-2) Generic Attention (텍스트/액션) — 캐시 전용 실행
+- 전제: `simlingo_inference_baseline`로 생성된 `.pt`에 언어 블록 attn/grad가 포함돼 있어야 함(`text_outputs`/`attention` 존재). 이미지 경로는 `.pt`→`scene_dir`→`payload_root/input_images/<tag>.png` 순으로 복구.
+- 루트에서 실행 예시:
+```bash
+# 텍스트 모드 Generic (캐시 전용)
+python -m experiment.generic_attention_baseline \
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_text_max_XXXX \
+  --output_dir experiment_outputs/generic_text \
+  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
+  --scene_dir data/sample_scene \
+  --text_token_strategy max --text_token_index -1 \
+  --colormap JET --alpha 0.5
+
+# 액션 모드 Generic (캐시 전용, ours.py)
+python -m experiment.ours \
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --output_dir experiment_outputs/generic_action \
+  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
+  --scene_dir data/sample_scene \
+  --colormap JET --alpha 0.5
+```
+- `--payload_root`는 필수이며, 모델을 다시 돌리지 않습니다.
+
 ## 압축/전송(참고)
 - 압축: `tar -czf <output.tgz> -C <input_parent_dir> <relative_path>`  
   예: `tar -czf results.tgz -C /root/TML_UDD_Team experiment_outputs/simlingo_inference`
