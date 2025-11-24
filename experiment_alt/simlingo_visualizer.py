@@ -331,7 +331,18 @@ class SimLingoVisualizer:
 
         def get_hook(name, save_grad=False):
             def hook(module, input, output):
-                # output is usually (attn_output, attn_weights, ...)
+                # Debug: Inspect output structure for the first layer
+                if "layer_0" in name and "vision" in name:
+                    print(f"DEBUG: Hook {name} Output Type: {type(output)}")
+                    if isinstance(output, tuple):
+                        print(f"DEBUG: Hook {name} Output Length: {len(output)}")
+                        for idx, item in enumerate(output):
+                            if hasattr(item, "shape"):
+                                print(f"  - Item {idx} Shape: {item.shape}")
+                            else:
+                                print(f"  - Item {idx} Type: {type(item)}")
+                
+                # Try to extract attn
                 if isinstance(output, tuple):
                     context = output[0]
                     if len(output) > 1:
@@ -343,14 +354,16 @@ class SimLingoVisualizer:
                     attn = None
                 
                 # Debug: Check context gradients (Layer Output)
-                if save_grad and context.requires_grad:
+                if save_grad and hasattr(context, "requires_grad") and context.requires_grad:
                     def context_grad_hook(grad):
-                        # Only print for first layer to avoid spam, or use a flag
                         if "layer_0" in name and "vision" in name:
                             print(f"DEBUG: Hook {name} Context (Output) Grad Mean: {grad.float().mean():.6e}")
                     context.register_hook(context_grad_hook)
 
-                if attn is None: return
+                if attn is None: 
+                    if "layer_0" in name and "vision" in name:
+                        print(f"DEBUG: Hook {name} - Attn is None!")
+                    return
 
                 # Debug: Check if attn is attached to graph
                 if "layer_0" in name and "vision" in name:
