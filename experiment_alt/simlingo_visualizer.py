@@ -324,143 +324,80 @@ class SimLingoVisualizer:
         self._speed_cache[key] = table
         return table
 
-    def _register_hooks(self, method="all"):
+    def get_hook(self, name):
+        def hook(module, input, output):
+            # output is typically (hidden_states, attentions) if output_attentions=True
+            # For Qwen2DecoderLayer, it returns (hidden_states, self_attn_weights, present_key_value)
+            # For InternVL2 vision layers, it's often (hidden_states, attention_weights)
+            
+            attn = None
+            
+            if isinstance(output, tuple):
+                # Check for attention weights in the tuple (usually a 4D tensor)
+                for item in output:
+                    if isinstance(item, torch.Tensor) and item.ndim == 4:
+                        attn = item
+                        break
+            elif isinstance(output, torch.Tensor):
+                 # If the module directly outputs the attention tensor
+                 if output.ndim == 4:
+                     attn = output
+            
+            if attn is not None:
+                # Capture gradient for Chefer's rule
+                if attn.requires_grad:
+                    def grad_hook(grad):
+                        self.grad_maps[name] = grad
+                    attn.register_hook(grad_hook)
+                
+                self.attn_maps[name] = attn.detach()
+                 
+        return hook
+
+    def _register_hooks(self):
         self.hooks = []
         self.attn_maps = {}
         self.grad_maps = {}
 
-        def get_hook(name, save_grad=False):
-            def hook(module, input, output):
-                # Debug: Inspect output structure for the first layer (Vision)
-                if "vision_layer_0" in name:
-                    pass
-                
-                # Debug: Inspect output structure for the first LLM layer
-                if "language_layer_0" in name:
-                    print(f"DEBUG: Hook {name} Module Type: {type(module)}")
-                    print(f"DEBUG: Hook {name} Output Type: {type(output)}")
-                    if isinstance(output, torch.Tensor):
-                        print(f"DEBUG: Hook {name} Output Shape: {output.shape}")
-                    elif isinstance(output, tuple):
-                        print(f"DEBUG: Hook {name} Output Tuple Len: {len(output)}")
-                        for idx, item in enumerate(output):
-                             if hasattr(item, "shape"):
-                                print(f"  - Item {idx} Shape: {item.shape}")
-                             else:
-                                print(f"  - Item {idx} Type: {type(item)}")
-
-                # Try to extract attn
-                attn = None
-                context = None
-                
-                if isinstance(output, tuple):
-                    context = output[0]
-                    if len(output) > 1:
-                        attn = output[1] # [B, H, S, S]
-                elif isinstance(output, torch.Tensor):
-                    # If hooking attn_drop, output IS the attention map
-                    # Check dimensions to be safe: [B, H, S, S] -> dim=4
-                    if output.dim() == 4:
-                        attn = output
-                        context = output # For debug consistency
-                    else:
-                        context = output
-                
-                # Debug: Check context gradients (Layer Output)
-                if save_grad and hasattr(context, "requires_grad") and context is not None and context.requires_grad:
-                    def context_grad_hook(grad):
-                        if ("vision_layer_0" in name) or ("language_layer_0" in name):
-                            print(f"DEBUG: Hook {name} Context (Output) Grad Mean: {grad.float().mean():.6e}")
-                    context.register_hook(context_grad_hook)
-
-                if attn is None: 
-                    if ("vision_layer_0" in name) or ("language_layer_0" in name):
-                        print(f"DEBUG: Hook {name} - Attn is None! Output shape: {output.shape if hasattr(output, 'shape') else 'N/A'}")
-                    return
-
-                # Debug: Check if attn is attached to graph
-                if ("vision_layer_0" in name) or ("language_layer_0" in name):
-                     print(f"Hook {name} captured attn. Shape: {attn.shape}, Requires Grad: {attn.requires_grad}")
-
-                self.attn_maps[name] = attn.detach()
-                
-                if save_grad:
-                    if attn.requires_grad:
-                        def grad_hook(grad):
-                            self.grad_maps[name] = grad.detach()
-                            if ("vision_layer_0" in name) or ("language_layer_0" in name):
-                                print(f"DEBUG: Hook {name} Attn Grad Mean: {grad.float().mean():.6e}")
-                        attn.register_hook(grad_hook)
-                    else:
-                        if ("vision_layer_0" in name) or ("language_layer_0" in name):
-                            print(f"WARNING: Hook {name} cannot register grad hook because attn.requires_grad is False")
-            return hook
-
-        # 1. Vision Encoder Hooks (for All methods)
-        vision_model = self.model.vision_model.image_encoder.model.vision_model
-        for i, layer in enumerate(vision_model.encoder.layers):
-            # Target the dropout layer after softmax (Standard way to get attention map in ViT)
-            # Structure: layer -> attn (InternAttention) -> attn_drop (Dropout)
-            if hasattr(layer, "attn") and hasattr(layer.attn, "attn_drop"):
+        # Register hooks for Vision Encoder
+        # Assuming InternVL2 structure: model.vision_model.image_encoder.model.vision_model.encoder.layers
+        vision_layers = self.model.vision_model.image_encoder.model.vision_model.encoder.layers
+        for i, layer in enumerate(vision_layers):
+            # Target the attention dropout layer directly if possible, or the block
+            target = None
+            if hasattr(layer, 'attn') and hasattr(layer.attn, 'attn_drop'):
                 target = layer.attn.attn_drop
-            elif hasattr(layer, "attention") and hasattr(layer.attention, "attn_drop"):
+            elif hasattr(layer, 'attention') and hasattr(layer.attention, 'attn_drop'):
                 target = layer.attention.attn_drop
-            else:
-                print(f"WARNING: Vision layer {i} structure unknown, cannot find attn_drop. Hooking layer instead.")
-                target = layer
             
-            # Generic needs grad, others don't (but we capture grad if we run generic)
-            save_grad = (method in ["generic", "all", "ours"])
-            self.hooks.append(target.register_forward_hook(get_hook(f"vision_layer_{i}", save_grad=save_grad)))
-
-        # 2. Language Model Hooks (For Ours/Generic if requested)
-        if method in ["generic", "all", "ours"]:
-            lm = self.model.language_model.model
-            
-            # Robust Layer Discovery
-            layers = []
-            if hasattr(lm, "layers"):
-                layers = lm.layers
-            elif hasattr(lm, "model"):
-                if hasattr(lm.model, "layers"):
-                    layers = lm.model.layers
-                elif hasattr(lm.model, "model") and hasattr(lm.model.model, "layers"):
-                    layers = lm.model.model.layers
-            elif hasattr(lm, "h"):
-                layers = lm.h
-            elif hasattr(lm, "block"):
-                layers = lm.block
-            elif hasattr(lm, "base_model") and hasattr(lm.base_model, "model") and hasattr(lm.base_model.model, "layers"):
-                layers = lm.base_model.model.layers
-                
-            print(f"DEBUG: Found {len(layers)} LLM layers for hooking.")
-            
-            for i, layer in enumerate(layers):
-                if i == 0:
-                    print(f"DEBUG: Hooking LLM layer {i}")
-                    
-                # Try to find attention dropout in LLM layer
-                # InternLM2: layer.attention.attn_drop? or layer.self_attn.dropout?
+            # Fallback to layer if specific dropout not found or if it's not a module
+            if target is not None and not isinstance(target, torch.nn.Module):
                 target = None
-                if hasattr(layer, "attention"):
-                    if hasattr(layer.attention, "attn_drop"): target = layer.attention.attn_drop
-                    elif hasattr(layer.attention, "dropout"): target = layer.attention.dropout
-                elif hasattr(layer, "self_attn"):
-                    if hasattr(layer.self_attn, "attn_drop"): target = layer.self_attn.attn_drop
-                    elif hasattr(layer.self_attn, "dropout"): target = layer.self_attn.dropout
-                    elif hasattr(layer.self_attn, "attention_dropout"): target = layer.self_attn.attention_dropout
                 
-                # Check if target is a module (it might be a float config value)
-                if target is not None and not isinstance(target, torch.nn.Module):
-                    target = None
+            if target is None:
+                target = layer # Hook the entire layer as a fallback
+                
+            self.hooks.append(target.register_forward_hook(self.get_hook(f"vision_layer_{i}")))
 
-                if target is None:
-                    # Fallback to layer and print structure to debug LLM
-                    target = layer
-                    if i == 0:
-                        print(f"DEBUG: LLM Layer 0 Structure (Cannot find dropout):\n{str(layer)}")
-                
-                self.hooks.append(target.register_forward_hook(get_hook(f"language_layer_{i}", save_grad=True)))
+        # Register hooks for Language Model
+        lm = self.model.language_model
+        if hasattr(lm, 'model'): # Handle PeftModel or similar wrappers
+            lm = lm.model
+            
+        llm_layers = None
+        if hasattr(lm, 'model') and hasattr(lm.model, 'layers'): # Qwen2ForCausalLM -> Qwen2Model -> layers
+            llm_layers = lm.model.layers
+        elif hasattr(lm, 'layers'): # Direct access to layers
+            llm_layers = lm.layers
+        
+        if llm_layers is None:
+            print("WARNING: Could not find LLM layers for hooking.")
+            return
+
+        for i, layer in enumerate(llm_layers):
+            # For LLM layers, hooking the layer directly is often sufficient if output_attentions=True
+            # as the attention weights will be part of the layer's output tuple.
+            self.hooks.append(layer.register_forward_hook(self.get_hook(f"language_layer_{i}")))
 
     def _remove_hooks(self):
         for h in self.hooks:
@@ -693,11 +630,9 @@ class SimLingoVisualizer:
         last_grad = grad_maps.get(last_name, torch.zeros_like(lm_maps[last_name])).float()
         query_grad_mag = last_grad.abs().mean(dim=(0, 1, 3))
         target_idx = torch.argmax(query_grad_mag).item()
-        print(f"[Generic] Dynamic Target Index: {target_idx} (Grad Mag: {query_grad_mag[target_idx]:.6e})")
         
         image_indices = meta.get("image_token_indices", [])
         if not image_indices:
-            print("DEBUG: No image_token_indices found in meta!")
             return torch.zeros(1)
             
         # Select Global View tokens (last num_image_tokens_per_patch)
@@ -705,11 +640,6 @@ class SimLingoVisualizer:
         if len(image_indices) > num_tokens:
             image_indices = image_indices[-num_tokens:]
             
-        print(f"DEBUG: Selected {len(image_indices)} image indices (Global View). First: {image_indices[0]}, Last: {image_indices[-1]}")
-        
-        print(f"DEBUG: Final R Matrix Stats - Mean: {R.mean():.6e}, Max: {R.max():.6e}")
-        print(f"DEBUG: R[0, target_idx, image_indices] Stats - Mean: {R[0, target_idx, image_indices].mean():.6e}")
-
         scores = R[0, target_idx, image_indices]
         return scores
 
@@ -747,12 +677,9 @@ class SimLingoVisualizer:
         # We want relevance OF image tokens TO the target token.
         # So we look at row 'target_idx'.
         
-        target_idx = S - 1 # Last token
-        
         # Get image token indices
         image_indices = meta.get("image_token_indices", [])
         if not image_indices:
-            print("[Ours] Warning: No image tokens found in prompt!")
             return torch.zeros(1)
             
         # FIX: InternVL concatenates tokens as [Tile1, Tile2, ..., GlobalView].
@@ -762,15 +689,8 @@ class SimLingoVisualizer:
         
         # If we have more tokens than num_tokens, it means we have tiles. Take the last ones.
         if len(image_indices) > num_tokens:
-            print(f"[Ours] Selecting last {num_tokens} tokens (Global View) from {len(image_indices)} total image tokens.")
             image_indices = image_indices[-num_tokens:]
-        else:
-            print(f"[Ours] Found {len(image_indices)} tokens (likely just Global View).")
             
-        # DEBUG: Check why R is 0
-        print(f"[Ours] Final R Matrix Stats - Mean: {R.mean():.6e}, Max: {R.max():.6e}")
-        print(f"[Ours] R[0, target_idx, image_indices] Stats - Mean: {R[0, target_idx, image_indices].mean():.6e}")
-        
         # DEBUG: Analyze Gradient Flow in Last Layer to find True Target
         last_name = sorted_keys[-1]
         last_attn = lm_maps[last_name].float()
@@ -782,7 +702,6 @@ class SimLingoVisualizer:
         
         # Dynamically select target index based on max gradient
         target_idx = torch.argmax(query_grad_mag).item()
-        print(f"[Ours] Dynamic Target Index: {target_idx} (Grad Mag: {query_grad_mag[target_idx]:.6e})")
         
         # Extract scores
         # For LLM, B is usually 1 (unless batching multiple prompts).
