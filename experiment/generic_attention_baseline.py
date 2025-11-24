@@ -132,7 +132,7 @@ class GenericAttentionTextVisualizer:
             return
 
         # Robust image directory search
-        candidates = [scene_dir / "video_garmin", scene_dir / "images", scene_dir]
+        candidates = [scene_dir / "input_images", scene_dir / "video_garmin", scene_dir / "images", scene_dir]
         image_root = scene_dir
         for cand in candidates:
             if cand.exists() and cand.is_dir():
