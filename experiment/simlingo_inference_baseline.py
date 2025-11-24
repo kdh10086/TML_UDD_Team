@@ -524,7 +524,8 @@ class SimLingoInferenceBaseline:
             self.cfg.model.vision_model.variant, image_size_override=self.image_size
         )
         self.model = self._build_model()
-        self.recorder = AttentionRecorder(keep_last_only=True)
+        # 모든 forward 스텝의 어텐션을 누적 저장 (메모리 사용 증가 가능)
+        self.recorder = AttentionRecorder(keep_last_only=False)
         self._register_attention_hooks()
         self._speed_cache: Dict[str, Dict[str, float]] = {}
 
