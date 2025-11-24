@@ -158,23 +158,20 @@ data/<dataset>/<scenario>/
 python -m experiment.vit_raw_attention \
   --output_dir experiment_outputs/vit_raw \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
   --scene_dir data/sample_scene \
   --layer_index -1 --head_strategy mean --colormap JET --alpha 0.5
 
 # Attention rollout
-python -m experiment.vit_attention_rollout \
+ python -m experiment.vit_attention_rollout \
   --output_dir experiment_outputs/vit_rollout \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
   --scene_dir data/sample_scene \
   --residual_alpha 0.5 --start_layer 0 --colormap JET --alpha 0.5
 
 # Attention flow
-python -m experiment.vit_attention_flow \
+ python -m experiment.vit_attention_flow \
   --output_dir experiment_outputs/vit_flow \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
   --scene_dir data/sample_scene \
   --residual_alpha 0.5 --discard_ratio 0.0 --colormap JET --alpha 0.5
 ```
@@ -185,19 +182,17 @@ python -m experiment.vit_attention_flow \
 - 루트에서 실행 예시:
 ```bash
 # 텍스트 모드 Generic (캐시 전용)
-python -m experiment.generic_attention_baseline \
+ python -m experiment.generic_attention_baseline \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_text_max_XXXX \
   --output_dir experiment_outputs/generic_text \
-  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
   --scene_dir data/sample_scene \
   --text_token_strategy max --text_token_index -1 \
   --colormap JET --alpha 0.5
 
 # 액션 모드 Generic (캐시 전용, ours.py)
-python -m experiment.ours \
+ python -m experiment.ours \
   --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
   --output_dir experiment_outputs/generic_action \
-  --config external/simlingo/configs/inference/inference_internvl2_1b.yaml \
   --scene_dir data/sample_scene \
   --colormap JET --alpha 0.5
 ```

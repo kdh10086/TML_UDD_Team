@@ -320,7 +320,7 @@ class VisionRawAttention:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sim-Lingo ViT raw-attention generator (cache only)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Hydra config path.")
-    parser.add_argument("--scene_dir", type=Path, default=None, help="Optional directory with scene images.")
+    parser.add_argument("--scene_dir", type=Path, default=None, help="Optional directory with scene images (fallback if input_images is missing).")
     parser.add_argument("--output_dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory to save heatmaps.")
     parser.add_argument("--device", type=str, default=None, help="Device identifier, e.g., cuda:0.")
     parser.add_argument(
