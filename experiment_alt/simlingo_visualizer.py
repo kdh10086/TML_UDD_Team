@@ -737,11 +737,12 @@ class SimLingoVisualizer:
         
         first_map = vision_maps[sorted_keys[0]]
         B, H, S, S = first_map.shape
-        R = torch.eye(S, device=self.device).unsqueeze(0).expand(B, S, S)
+        # Explicitly use float32 for R
+        R = torch.eye(S, device=self.device, dtype=torch.float32).unsqueeze(0).expand(B, S, S)
         
         for name in sorted_keys:
-            attn = vision_maps[name]
-            grad = grad_maps.get(name, torch.zeros_like(attn))
+            attn = vision_maps[name].float()
+            grad = grad_maps.get(name, torch.zeros_like(attn)).float()
             
             cam = attn * grad
             cam = cam.clamp(min=0).mean(dim=1)
@@ -768,11 +769,11 @@ class SimLingoVisualizer:
         B, H, S, S = first_map.shape
         
         # Initialize Relevance with Identity
-        R = torch.eye(S, device=self.device).unsqueeze(0).expand(B, S, S)
+        R = torch.eye(S, device=self.device, dtype=torch.float32).unsqueeze(0).expand(B, S, S)
         
         for name in sorted_keys:
-            attn = lm_maps[name]
-            grad = grad_maps.get(name, torch.zeros_like(attn))
+            attn = lm_maps[name].float()
+            grad = grad_maps.get(name, torch.zeros_like(attn)).float()
             
             # Chefer Rule: E_h [ (A * G)^+ ]
             cam = attn * grad
