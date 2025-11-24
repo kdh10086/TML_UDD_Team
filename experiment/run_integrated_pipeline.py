@@ -181,6 +181,8 @@ def main():
                 print(f"[Pipeline]   Method: {name}")
                 
                 method_dir = base_output_dir / name
+                method_dir.mkdir(parents=True, exist_ok=True)
+                
                 raw_dir = method_dir / "raw_heatmap"
                 final_dir = method_dir / "final_heatmap"
                 
@@ -192,12 +194,14 @@ def main():
                 if hasattr(runner, "_index_payloads"):
                     runner._payload_index = runner._index_payloads(pt_source)
                 
-                # Run generation for this batch
+                # Run generation for this batch - pass method_dir as output_dir
+                # The visualizer will create pt_log.txt there and save to raw_dir/final_dir
                 runner.generate_scene_heatmaps(
                     scene_dir=scenario_path,
-                    output_dir=final_dir,
+                    output_dir=method_dir,  # Changed: pass method_dir instead of final_dir
                     suffix=name,
                     raw_output_dir=raw_dir,
+                    final_output_dir=final_dir,  # Added: explicit final_dir
                     target_files=batch_files
                 )
                 

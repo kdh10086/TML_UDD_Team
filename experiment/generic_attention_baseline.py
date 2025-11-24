@@ -109,6 +109,7 @@ class GenericAttentionTextVisualizer:
         output_dir: Path,
         suffix: str = "generic_text",
         raw_output_dir: Optional[Path] = None,
+        final_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:
         """scene_dir 내 pt 파일들에 대해 히트맵을 생성하고 저장한다."""
@@ -117,12 +118,14 @@ class GenericAttentionTextVisualizer:
         if not scene_dir.exists():
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
-        scenario_raw_output_dir = None
+        
+        # Use final_output_dir if provided, otherwise default to output_dir/final
+        if final_output_dir is None:
+            final_output_dir = output_dir / "final"
+            final_output_dir.mkdir(parents=True, exist_ok=True)
         if raw_output_dir:
             raw_output_dir = Path(raw_output_dir)
             raw_output_dir.mkdir(parents=True, exist_ok=True)
-            scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
         
         # Resolve payload root
         # Resolve payload root
@@ -177,13 +180,7 @@ class GenericAttentionTextVisualizer:
         print(f"Using image root: {image_root}")
         route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
 
-        # Prepare output directories
-        final_dir = output_dir / "final"
-        final_dir.mkdir(parents=True, exist_ok=True)
-        
-        raw_dir = output_dir / "raw"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        
+        # pt_log.txt goes in output_dir (method_dir)
         pt_log_path = output_dir / "pt_log.txt"
 
         # If target_files is provided, we iterate over them.
@@ -221,7 +218,7 @@ class GenericAttentionTextVisualizer:
                 log_file.write(f"{tag} - {pt_path.name}\n")
                 
                 self._process_single_image(
-                    image_path, pt_path, final_dir, suffix, route_dir, speed_dir, raw_dir
+                    image_path, pt_path, final_output_dir, suffix, route_dir, speed_dir, raw_output_dir
                 )
 
     @staticmethod

@@ -97,6 +97,7 @@ class GenericAttentionActionVisualizer:
         output_dir: Path,
         suffix: str = "generic_action",
         raw_output_dir: Optional[Path] = None,
+        final_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:
         """scene_dir 내 pt 파일들에 대해 히트맵을 생성하고 저장한다."""
@@ -105,14 +106,16 @@ class GenericAttentionActionVisualizer:
         if not scene_dir.exists():
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
-        scenario_raw_output_dir = None
+        
+        # Use final_output_dir if provided, otherwise default to output_dir/final
+        if final_output_dir is None:
+            final_output_dir = output_dir / "final"
+        final_output_dir.mkdir(parents=True, exist_ok=True)
+        
         if raw_output_dir:
             raw_output_dir = Path(raw_output_dir)
             raw_output_dir.mkdir(parents=True, exist_ok=True)
-            scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
         
-        # Resolve payload root
         # Resolve payload root
         if self.payload_root and self.payload_root.exists():
             # Use already set payload_root (e.g. from pipeline)
@@ -145,93 +148,43 @@ class GenericAttentionActionVisualizer:
         for cand in candidates:
             print(f"[DEBUG] Checking candidate: {cand}")
             if cand.exists() and cand.is_dir():
-                # Check if it has images
-                if target_files:
-                    # If target_files provided, use them directly (assuming they are image paths)
-                    # We need to ensure they are Path objects
-                    image_paths = [Path(p) for p in target_files]
-                else:
-                    image_paths = sorted(
-                        [p for p in cand.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
-                    )
-                
-                if not self._payload_index:
-                    # If no payload index (maybe payload_root was not set in init), try to resolve it now
-                    # But we need payload_root to index.
-                    # If explicit_payload_root is set, we index it.
-                    if self.explicit_payload_root:
-                        self.payload_root = self._resolve_payload_root(self.explicit_payload_root, self.trajectory_overlay_root)
-                        self._payload_index = self._index_payloads(self.payload_root)
-                    elif scene_dir:
-                        # Try to derive
-                        candidates = [scene_dir / "pt", scene_dir]
-                        for c in candidates:
-                            if c.exists() and any(c.glob("*.pt")):
-                                self.payload_root = c
-                                self._payload_index = self._index_payloads(self.payload_root)
-                                break
-                
-                if not self._payload_index:
-                    raise RuntimeError("No payloads found. Please provide payload_root or ensure pt files exist in scene_dir/pt")
-
-                print(f"Using image root: {image_root}")
-                route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
-
-                # Prepare output directories
-                final_dir = output_dir / "final"
-                final_dir.mkdir(parents=True, exist_ok=True)
-                
-                raw_dir = output_dir / "raw"
-                raw_dir.mkdir(parents=True, exist_ok=True)
-                
-                pt_log_path = output_dir / "pt_log.txt"
-
-                # If target_files is provided, we iterate over them.
-                # But wait, ViT scripts iterate over PAYLOADS, not images.
-                # "for tag, payload_path in sorted(self._payload_index.items()):"
-                # We need to filter payloads based on target_files (images).
-                
-                if target_files:
-                    target_stems = {p.stem for p in target_files}
-                    # Filter payload index
-                    filtered_index = {k: v for k, v in self._payload_index.items() if k in target_stems}
-                    items_to_process = sorted(filtered_index.items())
-                else:
-                    items_to_process = sorted(self._payload_index.items())
-
-                with open(pt_log_path, "a") as log_file:
-                    for tag, payload_path in tqdm(items_to_process, desc=f"GenericAction ({scene_dir.name if scene_dir else '?'})", unit="img"):
-                        # Log the PT file usage (simple format: image_name - pt_filename)
-                        log_file.write(f"{tag} - {payload_path.name}\n")
-                        
-                        payload = torch.load(payload_path, map_location=self.device)
-                        image_path = self._resolve_image_path(payload, scene_dir)
-                        route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
-                        
-                        self._process_cached_payload(
-                            payload, image_path, final_dir, suffix, route_dir, speed_dir, raw_dir
-                        )
-                return # Exit after processing images from the first valid image_root
+                # Check if it has images or PT files
+                if target_files or any(p.suffix.lower() in {".png", ".jpg", ".jpeg"} for p in cand.iterdir()):
+                    image_root = cand
+                    break
             else:
                 print(f"[DEBUG] Candidate {cand} does not exist or is not a directory.")
 
-        # Iterate over payloads
-        for tag, pt_path in sorted(self._payload_index.items()):
-            # Find corresponding image
-            image_path = None
-            for ext in [".png", ".jpg", ".jpeg"]:
-                cand = image_root / f"{tag}{ext}"
-                if cand.exists():
-                    image_path = cand
-                    break
-            
-            if image_path is None:
-                print(f"Warning: Image not found for tag {tag} in {image_root}. Skipping.")
-                continue
+         # Validation
+        if not self._payload_index:
+            raise RuntimeError("No payloads found. Please provide payload_root or ensure pt files exist in scene_dir/pt")
 
-            self._process_single_image(
-                image_path, pt_path, scenario_output_dir, suffix, route_dir, speed_dir, scenario_raw_output_dir
-            )
+        print(f"Using image root: {image_root}")
+        route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
+
+        # pt_log.txt goes in output_dir (method_dir)
+        pt_log_path = output_dir / "pt_log.txt"
+
+        # Filter payloads based on target_files
+        if target_files:
+            target_stems = {p.stem for p in target_files}
+            filtered_index = {k: v for k, v in self._payload_index.items() if k in target_stems}
+            items_to_process = sorted(filtered_index.items())
+        else:
+            items_to_process = sorted(self._payload_index.items())
+
+        with open(pt_log_path, "a") as log_file:
+            for tag, payload_path in tqdm(items_to_process, desc=f"GenericAction ({scene_dir.name if scene_dir else '?'})", unit="img"):
+                # Log the PT file usage (simple format: image_name - pt_filename)
+                log_file.write(f"{tag} - {payload_path.name}\n")
+                
+                payload = torch.load(payload_path, map_location=self.device)
+                image_path = self._resolve_image_path(payload, scene_dir)
+                route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
+                
+                self._process_cached_payload(
+                    payload, image_path, final_output_dir, suffix, route_dir, speed_dir, raw_output_dir
+                )
 
     def _process_single_image(
         self,

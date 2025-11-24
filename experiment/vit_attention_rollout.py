@@ -96,26 +96,23 @@ class VisionAttentionRollout:
         output_dir: Path,
         suffix: str = "vit_rollout",
         raw_output_dir: Optional[Path] = None,
+        final_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
-        scenario_raw_output_dir = None
+        
+        # Use final_output_dir if provided
+        if final_output_dir is None:
+            final_output_dir = output_dir / "final"
+            final_output_dir.mkdir(parents=True, exist_ok=True)
         if raw_output_dir:
             raw_output_dir = Path(raw_output_dir)
             raw_output_dir.mkdir(parents=True, exist_ok=True)
-            scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
         if not self._payload_index:
             raise RuntimeError("No payloads found under payload_root.")
             
-        # Prepare output directories
-        final_dir = output_dir / "final"
-        final_dir.mkdir(parents=True, exist_ok=True)
-        
-        raw_dir = output_dir / "raw"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        
+        # pt_log.txt goes in output_dir (method_dir)
         pt_log_path = output_dir / "pt_log.txt"
 
         # If target_files is provided, we iterate over them.
@@ -140,7 +137,7 @@ class VisionAttentionRollout:
                 image_path = self._resolve_image_path(payload, scene_dir)
                 route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
                 self._process_cached_payload(
-                    payload, image_path, final_dir, suffix, route_dir, speed_dir, raw_dir
+                    payload, image_path, final_output_dir, suffix, route_dir, speed_dir, raw_output_dir
                 )
 
     def _process_cached_payload(
