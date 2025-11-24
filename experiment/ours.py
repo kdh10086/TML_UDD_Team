@@ -172,6 +172,9 @@ class GenericAttentionActionVisualizer:
                 if not self._payload_index:
                     raise RuntimeError("No payloads found. Please provide payload_root or ensure pt files exist in scene_dir/pt")
 
+                print(f"Using image root: {image_root}")
+                route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
+
                 for image_path in tqdm(image_paths, desc=f"GenericAction ({scene_dir.name})", unit="img"):
                     # Find corresponding payload for the image
                     tag = image_path.stem
@@ -186,9 +189,6 @@ class GenericAttentionActionVisualizer:
                 return # Exit after processing images from the first valid image_root
             else:
                 print(f"[DEBUG] Candidate {cand} does not exist or is not a directory.")
-        
-        print(f"Using image root: {image_root}")
-        route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
 
         # Iterate over payloads
         for tag, pt_path in sorted(self._payload_index.items()):

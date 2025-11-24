@@ -168,6 +168,10 @@ class GenericAttentionTextVisualizer:
             else:
                 print(f"[DEBUG] Candidate {cand} does not exist or is not a directory.")
         
+        if image_root is None:
+             print(f"Warning: Could not find any image directory in {scene_dir}")
+             return
+
         print(f"Using image root: {image_root}")
         route_dir, speed_dir = resolve_overlay_dirs(image_root, self.trajectory_overlay_root)
 
