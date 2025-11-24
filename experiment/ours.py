@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+from tqdm import tqdm
 from hydra.utils import to_absolute_path
 from omegaconf import OmegaConf
 from transformers import AutoProcessor
