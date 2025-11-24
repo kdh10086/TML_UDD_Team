@@ -14,6 +14,7 @@ import importlib.util
 import os
 import shutil
 import sys
+import types
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import datetime
@@ -65,6 +66,25 @@ def _patched_extract_feature(self, pixel_values, **kwargs):
 
 if _orig_extract_feature is not None:
     ivl.LingoInternVLModel.extract_feature = _patched_extract_feature
+
+# Patch AutoModel.extract_feature at runtime so AutoModel forward is called with output_attentions=True
+def _install_extract_feature_patch(auto_model) -> None:
+    orig = getattr(auto_model, "extract_feature", None)
+    if orig is None:
+        return
+
+    def _patched(self, pixel_values, **kwargs):
+        outputs = self.forward(pixel_values, output_attentions=True, return_dict=True)
+        if hasattr(outputs, "last_hidden_state"):
+            return outputs.last_hidden_state
+        if isinstance(outputs, dict) and "last_hidden_state" in outputs:
+            return outputs["last_hidden_state"]
+        if isinstance(outputs, (list, tuple)) and len(outputs) > 0:
+            return outputs[0]
+        # fallback to original behavior if forward signature unexpected
+        return orig(pixel_values, **kwargs)
+
+    auto_model.extract_feature = types.MethodType(_patched, auto_model)
 
 DEFAULT_CONFIG_PATH = Path("checkpoints/simlingo/simlingo/.hydra/config.yaml")  # 기본 Hydra config
 DEFAULT_CHECKPOINT_PATH = Path("checkpoints/simlingo/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt")  # 기본 ckpt
@@ -320,11 +340,12 @@ TEXT_TOKEN_STRATEGIES = ("max", "last", "index")
 class AttentionRecorder:
     """ViT/LLaMA 블록의 어텐션 출력을 훅으로 수집하고 가중치·그래디언트를 저장합니다."""
 
-    def __init__(self, store_on_cpu: bool = True) -> None:
+    def __init__(self, store_on_cpu: bool = True, keep_last_only: bool = False) -> None:
         self.store_on_cpu = store_on_cpu
+        self.keep_last_only = keep_last_only
         self.handles: List[torch.utils.hooks.RemovableHandle] = []
         self.records: List[Dict[str, Any]] = []
-        self._active_buffers: Optional[defaultdict] = None
+        self._active_buffers: Optional[dict] = None
         self._current_tag: Optional[str] = None
 
     def register_module(self, module: torch.nn.Module, name: str, record_grad: bool = True) -> None:
@@ -336,9 +357,15 @@ class AttentionRecorder:
                 return
             if record_grad:
                 attn.retain_grad()
-                self._active_buffers.setdefault(name, []).append(attn)
+                if self.keep_last_only:
+                    self._active_buffers[name] = attn
+                else:
+                    self._active_buffers.setdefault(name, []).append(attn)
             else:
-                self._active_buffers.setdefault(name, []).append(attn.detach())
+                if self.keep_last_only:
+                    self._active_buffers[name] = attn.detach()
+                else:
+                    self._active_buffers.setdefault(name, []).append(attn.detach())
 
         handle = module.register_forward_hook(hook)
         self.handles.append(handle)
@@ -372,14 +399,15 @@ class AttentionRecorder:
 
     def start_recording(self, tag: str) -> None:
         self._current_tag = tag
-        self._active_buffers = defaultdict(list)
+        self._active_buffers = defaultdict(list) if not self.keep_last_only else {}
 
     def stop_recording(self) -> Dict[str, List[Dict[str, torch.Tensor]]]:
         assert self._active_buffers is not None, "Recording was not started."
         aggregated: Dict[str, List[Dict[str, torch.Tensor]]] = {}
         for name, tensors in self._active_buffers.items():
+            tensor_list = [tensors] if self.keep_last_only else tensors
             aggregated[name] = []
-            for tensor in tensors:
+            for tensor in tensor_list:
                 attn_tensor = tensor.detach()
                 grad_tensor = tensor.grad.detach() if tensor.grad is not None else None
                 if self.store_on_cpu:
@@ -393,7 +421,6 @@ class AttentionRecorder:
                         "shape": tuple(tensor.shape),
                     }
                 )
-                # 불필요한 참조를 끊어 메모리 누수를 방지
                 tensor.grad = None
         self.records.append({"tag": self._current_tag, "maps": aggregated})
         if not aggregated and os.environ.get("ATTN_DEBUG"):
@@ -466,8 +493,9 @@ class SimLingoInferenceBaseline:
         self.use_spline = use_spline
         self.spline_smoothing = max(0.0, float(spline_smoothing))
         self.spline_num_samples = spline_num_samples if spline_num_samples and spline_num_samples > 0 else None
+        # ViT/LLM 모두 어텐션을 수집 (기본 켜짐)
         if enable_vision_hooks is None:
-            enable_vision_hooks = self.explain_mode == "action"
+            enable_vision_hooks = True
         if enable_language_hooks is None:
             enable_language_hooks = True
         self.enable_vision_hooks = enable_vision_hooks
@@ -502,7 +530,7 @@ class SimLingoInferenceBaseline:
             self.cfg.model.vision_model.variant, image_size_override=self.image_size
         )
         self.model = self._build_model()
-        self.recorder = AttentionRecorder()
+        self.recorder = AttentionRecorder(keep_last_only=True)
         self._register_attention_hooks()
         self._speed_cache: Dict[str, Dict[str, float]] = {}
 
@@ -535,27 +563,29 @@ class SimLingoInferenceBaseline:
         model.language_model.model.config.output_attentions = True
         model.language_model.model.config.output_hidden_states = True
         model.vision_model.image_encoder.model.config.output_attentions = True
+        # patch extract_feature on AutoModel so forward runs with output_attentions=True
+        _install_extract_feature_patch(model.vision_model.image_encoder.model)
         return model
 
     def _register_attention_hooks(self) -> None:
         """비전/언어 트랜스포머 블록 전체에 레코더 훅을 연결합니다."""
-        # 비전 인코더 블록 훅 등록
+        # 비전 인코더 블록 훅 등록 (어텐션만, grad는 비활성화해 메모리 절약)
         if self.enable_vision_hooks:
             vision_container = getattr(self.model.vision_model, "image_encoder", None)
             vision_model = getattr(vision_container, "model", None)
             if vision_model is not None:
                 # top-level AutoModel (captures BaseModelOutput.attentions if provided)
-                self.recorder.register_module(vision_model, "vision_model_top", record_grad=True)
+                self.recorder.register_module(vision_model, "vision_model_top", record_grad=False)
                 # inner vision encoder (e.g., vision_model.encoder.layers)
                 core = getattr(vision_model, "vision_model", vision_model)
                 if hasattr(core, "encoder"):
                     for idx, block in enumerate(core.encoder.layers):
-                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=True)
+                        self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
             # top-level CausalLM/LLM module (captures BaseModelOutput.attentions if provided)
-            self.recorder.register_module(lm, "language_model_top")
+            self.recorder.register_module(lm, "language_model_top", record_grad=True)
             if hasattr(lm, "model") and hasattr(lm.model, "layers"):
                 layers = lm.model.layers
             elif hasattr(lm, "layers"):
@@ -563,7 +593,7 @@ class SimLingoInferenceBaseline:
             else:
                 layers = []
             for idx, block in enumerate(layers):
-                self.recorder.register_module(block, f"language_block_{idx}")
+                self.recorder.register_module(block, f"language_block_{idx}", record_grad=True)
 
     def _build_scenario_name(self, scenario_dir: Path) -> str:
         """시나리오 경로에서 정렬/원본, city 번호, 시나리오 번호를 추출해 접두어를 만듭니다."""

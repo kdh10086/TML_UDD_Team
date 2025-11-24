@@ -137,7 +137,7 @@ data/<dataset>/<scenario>/
 - 단일 GPU 실행 예:
   ```bash
   PYTHONPATH=. python experiment/simlingo_inference_baseline.py \
-    --scene_dir data/sample/01 \
+    --scene_dir data/sample_small/01 \
     --output_dir experiment_outputs/simlingo_inference \
     --target_mode auto \
     --explain_mode action \
