@@ -294,6 +294,7 @@ class SimLingoVisualizer:
             "original_height": orig_hw[0],
             "original_width": orig_hw[1],
             "num_patches": num_patches,
+            "num_image_tokens_per_patch": self.num_image_token,
             "image_token_indices": image_token_indices,
             "seq_len": input_ids.shape[1]
         }
@@ -740,12 +741,11 @@ class SimLingoVisualizer:
             print("DEBUG: No image_token_indices found in meta!")
             return torch.zeros(1)
             
-        # Select Global View tokens (last num_patches)
-        num_patches = meta.get("num_patches", 256)
-        if len(image_indices) > num_patches:
-            image_indices = image_indices[-num_patches:]
-            
-        print(f"DEBUG: Selected {len(image_indices)} image indices (Global View). First: {image_indices[0]}, Last: {image_indices[-1]}")
+        # Select global-view tokens: last patch's tokens (num_image_tokens_per_patch)
+        num_tokens_per_patch = meta.get("num_image_tokens_per_patch", len(image_indices))
+        if len(image_indices) > num_tokens_per_patch:
+            image_indices = image_indices[-num_tokens_per_patch:]
+        print(f"DEBUG: Selected {len(image_indices)} image indices (global view tokens). First: {image_indices[0]}, Last: {image_indices[-1]}")
         
         # Check gradients before loop
         print(f"DEBUG: Checking gradients for {len(sorted_keys)} layers...")
@@ -817,17 +817,13 @@ class SimLingoVisualizer:
             print("[Ours] Warning: No image tokens found in prompt!")
             return torch.zeros(1)
             
-        # FIX: InternVL concatenates tokens as [Tile1, Tile2, ..., GlobalView].
-        # To visualize the whole image properly, we should focus on the Global View tokens.
-        # These are the LAST 'num_patches' tokens in the image sequence.
-        num_patches = meta.get("num_patches", 256) # Default to 256 if not found, but usually passed in meta
-        
-        # If we have more tokens than num_patches, it means we have tiles. Take the last ones.
-        if len(image_indices) > num_patches:
-            print(f"[Ours] Selecting last {num_patches} tokens (Global View) from {len(image_indices)} total image tokens.")
-            image_indices = image_indices[-num_patches:]
+        # Focus on global view tokens: last patch's tokens (num_image_tokens_per_patch)
+        num_tokens_per_patch = meta.get("num_image_tokens_per_patch", len(image_indices))
+        if len(image_indices) > num_tokens_per_patch:
+            print(f"[Ours] Selecting last {num_tokens_per_patch} tokens (Global View) from {len(image_indices)} total image tokens.")
+            image_indices = image_indices[-num_tokens_per_patch:]
         else:
-            print(f"[Ours] Found {len(image_indices)} tokens (likely just Global View).")
+            print(f"[Ours] Using all {len(image_indices)} image tokens (likely single patch).")
             
         # Extract scores
         # For LLM, B is usually 1 (unless batching multiple prompts).
