@@ -527,27 +527,36 @@ class GenericAttentionTextVisualizer:
             return None
         return payload
 
-    def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
-        num_views = int(meta["num_patch_views"])
-        tokens_per_view = int(meta["num_image_tokens_per_patch"])
-        total_tokens = int(meta["num_total_image_tokens"])
-        if token_scores.numel() != total_tokens:
-            raise RuntimeError(
-                f"Token score length ({token_scores.numel()}) does not match meta ({total_tokens})."
-            )
-        grid = int(math.sqrt(tokens_per_view))
-        if grid * grid != tokens_per_view:
-            raise RuntimeError(
-                f"Tokens per patch ({tokens_per_view}) is not a perfect square; cannot reshape to grid."
-            )
-        scores = token_scores.view(num_views, 1, grid, grid)
-        scores = scores.mean(dim=0)  # 단순 평균으로 뷰를 통합
-        H = int(meta["original_height"])
-        W = int(meta["original_width"])
-        heatmap = F.interpolate(scores, size=(H, W), mode="bilinear", align_corners=False)
-        heatmap = heatmap.squeeze(0).squeeze(0)
-        heatmap = heatmap - heatmap.min()
-        heatmap = heatmap / heatmap.max().clamp_min(1e-6)
+    def _scores_to_heatmap(self, scores: torch.Tensor, meta: Dict[str, Any]) -> np.ndarray:
+        total_tokens = meta["num_total_image_tokens"]
+        orig_h = meta["original_height"]
+        orig_w = meta["original_width"]
+        
+        # Attempt to find best H, W such that H*W = total_tokens and H/W ~ orig_h/orig_w
+        best_h, best_w = int(math.sqrt(total_tokens)), int(math.sqrt(total_tokens))
+        min_error = float("inf")
+        target_ratio = orig_w / orig_h
+        
+        for h in range(1, int(math.sqrt(total_tokens)) + 1):
+            if total_tokens % h == 0:
+                w = total_tokens // h
+                # Check pair (h, w)
+                ratio = w / h
+                error = abs(ratio - target_ratio)
+                if error < min_error:
+                    min_error = error
+                    best_h, best_w = h, w
+                
+                # Check pair (w, h)
+                ratio_inv = h / w
+                error_inv = abs(ratio_inv - target_ratio)
+                if error_inv < min_error:
+                    min_error = error_inv
+                    best_h, best_w = w, h
+
+        heatmap = scores.reshape(best_h, best_w).detach().to("cpu").numpy()
+        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+        heatmap = cv2.resize(heatmap, (orig_w, orig_h))
         return heatmap
 
     def _render_overlay(

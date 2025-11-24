@@ -236,10 +236,35 @@ class GenericAttentionActionVisualizer:
         return candidate
 
     def _scores_to_heatmap(self, scores: torch.Tensor, meta: Dict[str, Any]) -> np.ndarray:
-        grid_size = int(math.sqrt(meta["num_total_image_tokens"]))
-        heatmap = scores.reshape(grid_size, grid_size).detach().to("cpu").numpy()
+        total_tokens = meta["num_total_image_tokens"]
+        orig_h = meta["original_height"]
+        orig_w = meta["original_width"]
+        
+        # Attempt to find best H, W such that H*W = total_tokens and H/W ~ orig_h/orig_w
+        best_h, best_w = int(math.sqrt(total_tokens)), int(math.sqrt(total_tokens))
+        min_error = float("inf")
+        target_ratio = orig_w / orig_h
+        
+        for h in range(1, int(math.sqrt(total_tokens)) + 1):
+            if total_tokens % h == 0:
+                w = total_tokens // h
+                # Check pair (h, w)
+                ratio = w / h
+                error = abs(ratio - target_ratio)
+                if error < min_error:
+                    min_error = error
+                    best_h, best_w = h, w
+                
+                # Check pair (w, h)
+                ratio_inv = h / w
+                error_inv = abs(ratio_inv - target_ratio)
+                if error_inv < min_error:
+                    min_error = error_inv
+                    best_h, best_w = w, h
+
+        heatmap = scores.reshape(best_h, best_w).detach().to("cpu").numpy()
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
-        heatmap = cv2.resize(heatmap, (meta["original_width"], meta["original_height"]))
+        heatmap = cv2.resize(heatmap, (orig_w, orig_h))
         return heatmap
 
     def _render_overlay(
