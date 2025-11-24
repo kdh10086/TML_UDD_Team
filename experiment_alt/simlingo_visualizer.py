@@ -392,6 +392,10 @@ class SimLingoVisualizer:
         
         # Generate Visualizations
         for method in methods:
+            # Create method-specific subdirectory
+            method_dir = output_dir / method
+            method_dir.mkdir(parents=True, exist_ok=True)
+            
             if method == "generic":
                 heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps)
             elif method == "rollout":
@@ -404,6 +408,10 @@ class SimLingoVisualizer:
                 heatmap = self._get_ours_relevance(self.attn_maps, self.grad_maps, meta)
             else:
                 continue
+            
+            # Debug: Print heatmap stats
+            if heatmap.numel() > 0:
+                print(f"[{method}] Heatmap Stats - Min: {heatmap.min():.4f}, Max: {heatmap.max():.4f}, Mean: {heatmap.mean():.4f}")
                 
             # 1. Create Heatmap Overlay (Original + Heatmap)
             overlay_bgr = self._create_heatmap_overlay(heatmap, image_path, meta)
@@ -414,24 +422,15 @@ class SimLingoVisualizer:
             overlay_pil = Image.fromarray(overlay_rgb)
             
             # 3. Draw Trajectory on top of Heatmap
+            # Save as {stem}.png inside the method folder
             self._project_and_draw_points(
                 pred_route,
                 (meta["original_height"], meta["original_width"]),
                 (0, 0, 255, 255), # Red
                 3,
-                output_dir / f"{image_path.stem}_{method}.png",
+                method_dir / f"{image_path.stem}.png",
                 background_image=overlay_pil
             )
-
-        # Save Trajectory Only (Reference)
-        self._project_and_draw_points(
-            pred_route,
-            (meta["original_height"], meta["original_width"]),
-            (0, 0, 255, 255),
-            3,
-            output_dir / f"{image_path.stem}_traj.png",
-            background_image_path=image_path
-        )
         
         self._remove_hooks()
         self.attn_maps = {}
@@ -460,7 +459,12 @@ class SimLingoVisualizer:
             cam = cam.clamp(min=0).mean(dim=1)
             R = R + torch.bmm(cam, R)
             
-        return R[0, 0, 1:]
+        # FIX: InternVL ignores CLS token. We must aggregate relevance w.r.t ALL patch tokens.
+        # R[-1] is the last batch item (Global View).
+        # R[-1, 1:, 1:] is the Patch-to-Patch relevance matrix.
+        # Summing over dim 0 (rows) gives total relevance of each patch to the entire output embedding set.
+        if S <= 1: return torch.zeros(1) # Ensure there are patches beyond CLS token
+        return R[-1, 1:, 1:].sum(dim=0)
 
     def _get_ours_relevance(self, attn_maps, grad_maps, meta):
         # "Ours" = Generic Attention on Language Model Layers
@@ -504,9 +508,24 @@ class SimLingoVisualizer:
         # Get image token indices
         image_indices = meta.get("image_token_indices", [])
         if not image_indices:
+            print("[Ours] Warning: No image tokens found in prompt!")
             return torch.zeros(1)
             
+        # FIX: InternVL concatenates tokens as [Tile1, Tile2, ..., GlobalView].
+        # To visualize the whole image properly, we should focus on the Global View tokens.
+        # These are the LAST 'num_patches' tokens in the image sequence.
+        num_patches = meta.get("num_patches", 256) # Default to 256 if not found, but usually passed in meta
+        
+        # If we have more tokens than num_patches, it means we have tiles. Take the last ones.
+        if len(image_indices) > num_patches:
+            print(f"[Ours] Selecting last {num_patches} tokens (Global View) from {len(image_indices)} total image tokens.")
+            image_indices = image_indices[-num_patches:]
+        else:
+            print(f"[Ours] Found {len(image_indices)} tokens (likely just Global View).")
+            
         # Extract scores
+        # For LLM, B is usually 1 (unless batching multiple prompts).
+        # We take batch 0.
         scores = R[0, target_idx, image_indices] # [Num_Image_Tokens]
         
         return scores
@@ -523,12 +542,14 @@ class SimLingoVisualizer:
         
         for name in sorted_keys:
             attn = vision_maps[name]
-            attn_mean = attn.mean(dim=1)
+            attn_mean = attn.mean(dim=1) # [B, S, S]
             attn_mean = attn_mean + torch.eye(S, device=self.device).unsqueeze(0)
             attn_mean = attn_mean / attn_mean.sum(dim=-1, keepdim=True)
             R = torch.bmm(attn_mean, R)
             
-        return R[0, 0, 1:]
+        # FIX: Aggregate all patches
+        if S <= 1: return torch.zeros(1) # Ensure there are patches beyond CLS token
+        return R[-1, 1:, 1:].sum(dim=0)
 
     def _get_flow_relevance(self, attn_maps):
         vision_maps = {k: v for k, v in attn_maps.items() if "vision" in k}
@@ -542,10 +563,14 @@ class SimLingoVisualizer:
         
         for name in sorted_keys:
             attn = vision_maps[name]
-            attn_mean = attn.mean(dim=1)
+            attn_mean = attn.mean(dim=1) # [B, S, S]
+            # No residual connection for pure flow usually, but let's check standard impl.
+            # Often it's just chain multiplication.
             R = torch.bmm(attn_mean, R)
             
-        return R[0, 0, 1:]
+        # FIX: Aggregate all patches
+        if S <= 1: return torch.zeros(1) # Ensure there are patches beyond CLS token
+        return R[-1, 1:, 1:].sum(dim=0)
 
     def _get_raw_attention(self, attn_maps):
         vision_maps = {k: v for k, v in attn_maps.items() if "vision" in k}
@@ -555,19 +580,39 @@ class SimLingoVisualizer:
 
         last_name = sorted_keys[-1]
         attn = vision_maps[last_name]
-        return attn.mean(dim=1)[0, 0, 1:]
+        # FIX: Aggregate all patches
+        if attn.shape[2] <= 1: return torch.zeros(1) # Ensure there are patches beyond CLS token
+        return attn.mean(dim=1)[-1, 1:, 1:].sum(dim=0)
 
     def _create_heatmap_overlay(self, heatmap, image_path, meta):
+        if heatmap.numel() == 0: return None
+        
         n_patches = heatmap.shape[0]
         grid_size = int(np.sqrt(n_patches))
-        if grid_size * grid_size != n_patches: pass
         
-        heatmap = heatmap.view(grid_size, grid_size).float().cpu().numpy()
+        # Ensure heatmap is detached and float before normalization
+        heatmap = heatmap.float().detach()
+
+        # Handle mismatch (e.g. if patches != square)
+        if grid_size * grid_size != n_patches:
+            # If not a perfect square, try to reshape to a 1D array for resizing
+            # or handle cases where it's not easily reshaped to 2D.
+            # For now, if it's not square, we'll just treat it as a 1D array
+            # and let cv2.resize handle the interpolation.
+            heatmap_2d = heatmap.view(1, n_patches).cpu().numpy()
+        else:
+            heatmap_2d = heatmap.view(grid_size, grid_size).cpu().numpy()
+            
         orig_h, orig_w = meta["original_height"], meta["original_width"]
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
         
-        heatmap_img = cv2.resize(heatmap, (orig_w, orig_h))
-        heatmap_img = np.uint8(255 * heatmap_img)
+        # Robust Normalization
+        # If max == min, normalize returns 0. Avoid this.
+        if heatmap_22.max() == heatmap_2d.min():
+            heatmap_norm = np.zeros_like(heatmap_2d, dtype=np.uint8)
+        else:
+            heatmap_norm = cv2.normalize(heatmap_2d, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        
+        heatmap_img = cv2.resize(heatmap_norm, (orig_w, orig_h))
         heatmap_img = cv2.applyColorMap(heatmap_img, cv2.COLORMAP_JET)
         
         orig_img = cv2.imread(str(image_path))
