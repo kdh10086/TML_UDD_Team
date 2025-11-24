@@ -191,12 +191,35 @@ class VisionAttentionFlow:
     def _collect_vision_matrices(
         self, attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]]
     ) -> List[torch.Tensor]:
-        items = [(name, entries) for name, entries in attention_maps.items() if "vision_block" in name]
+        import re
+        # Filter for vision block attention keys
+        # Supports keys like "vision_block_0" or "vision_attn_vision_model_encoder_layers_0_attn_attn_drop"
+        items = []
+        for name, entries in attention_maps.items():
+            if "vision_block" in name or "vision_attn" in name:
+                # Try to extract layer index
+                # Matches "block_12" or "layers_12"
+                match = re.search(r"(?:block|layers)_(\d+)", name)
+                if match:
+                    layer_idx = int(match.group(1))
+                    items.append((layer_idx, name, entries))
+        
         if not items:
             raise RuntimeError("No vision block attention maps were recorded.")
-        items.sort(key=lambda kv: int(kv[0].split("_")[-1]) if kv[0].split("_")[-1].isdigit() else 0)
+        
+        # Group by layer index and pick one (if duplicates)
+        from collections import defaultdict
+        layer_map = defaultdict(list)
+        for idx, name, entries in items:
+            layer_map[idx].append((name, entries))
+        
+        sorted_layers = sorted(layer_map.keys())
+        
         matrices: List[torch.Tensor] = []
-        for _, entries in items:
+        for idx in sorted_layers:
+            # Pick one entry per layer. Maybe pick the one with longest name? (more specific)
+            best_entry = max(layer_map[idx], key=lambda x: len(x[0]))
+            entries = best_entry[1]
             tensors = [entry["attn"] for entry in entries if entry.get("attn") is not None]
             if not tensors:
                 continue
@@ -212,8 +235,6 @@ class VisionAttentionFlow:
             if stacked.dim() == 3:
                 stacked = stacked.unsqueeze(0)
             matrices.append(stacked)
-        if not matrices:
-            raise RuntimeError("Vision attention tensors were empty after aggregation.")
         return matrices
 
     def _compute_attention_flow(
