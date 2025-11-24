@@ -88,7 +88,6 @@ class VisionAttentionFlow:
         scene_dir: Optional[Path],
         output_dir: Path,
         suffix: str = "vit_flow",
-        suffix: str = "vit_flow",
         raw_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:

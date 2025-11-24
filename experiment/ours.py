@@ -93,7 +93,6 @@ class GenericAttentionActionVisualizer:
         scene_dir: Path,
         output_dir: Path,
         suffix: str = "generic_action",
-        suffix: str = "generic_action",
         raw_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:

@@ -88,7 +88,6 @@ class VisionRawAttention:
         scene_dir: Optional[Path],
         output_dir: Path,
         suffix: str = "vit_raw",
-        suffix: str = "vit_raw",
         raw_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:

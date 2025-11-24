@@ -105,7 +105,6 @@ class GenericAttentionTextVisualizer:
         scene_dir: Path,
         output_dir: Path,
         suffix: str = "generic_text",
-        suffix: str = "generic_text",
         raw_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:

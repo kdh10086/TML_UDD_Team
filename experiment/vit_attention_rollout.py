@@ -86,7 +86,6 @@ class VisionAttentionRollout:
         scene_dir: Optional[Path],
         output_dir: Path,
         suffix: str = "vit_rollout",
-        suffix: str = "vit_rollout",
         raw_output_dir: Optional[Path] = None,
         target_files: Optional[List[Path]] = None,
     ) -> None:
