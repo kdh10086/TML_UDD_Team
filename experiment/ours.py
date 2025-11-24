@@ -88,7 +88,13 @@ class GenericAttentionActionVisualizer:
         self.explicit_payload_root = payload_root
         self._payload_index = {} # Will be populated in generate_scene_heatmaps
 
-    def generate_scene_heatmaps(self, scene_dir: Path, output_dir: Path, suffix: str = "generic_action") -> None:
+    def generate_scene_heatmaps(
+        self,
+        scene_dir: Path,
+        output_dir: Path,
+        suffix: str = "generic_action",
+        raw_output_dir: Optional[Path] = None,
+    ) -> None:
         """scene_dir 내 pt 파일들에 대해 히트맵을 생성하고 저장한다."""
         scene_dir = Path(scene_dir)
         output_dir = Path(output_dir)
@@ -96,6 +102,11 @@ class GenericAttentionActionVisualizer:
             raise FileNotFoundError(f"Scene directory not found: {scene_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
         scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
+        scenario_raw_output_dir = None
+        if raw_output_dir:
+            raw_output_dir = Path(raw_output_dir)
+            raw_output_dir.mkdir(parents=True, exist_ok=True)
+            scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
         
         # Resolve payload root
         if self.explicit_payload_root:
@@ -156,7 +167,9 @@ class GenericAttentionActionVisualizer:
                 print(f"Warning: Image not found for tag {tag} in {image_root}. Skipping.")
                 continue
 
-            self._process_single_image(image_path, pt_path, scenario_output_dir, suffix, route_dir, speed_dir)
+            self._process_single_image(
+                image_path, pt_path, scenario_output_dir, suffix, route_dir, speed_dir, scenario_raw_output_dir
+            )
 
     def _process_single_image(
         self,
@@ -166,6 +179,7 @@ class GenericAttentionActionVisualizer:
         suffix: str,
         route_overlay_dir: Optional[Path],
         speed_overlay_dir: Optional[Path],
+        raw_output_dir: Optional[Path] = None,
     ) -> Path:
         record_tag = image_path.stem
         # Load directly from pt_path
@@ -183,7 +197,13 @@ class GenericAttentionActionVisualizer:
              return None
 
         return self._process_cached_payload(
-            cached_payload, image_path, output_dir, suffix, route_overlay_dir, speed_overlay_dir
+            cached_payload,
+            image_path,
+            output_dir,
+            suffix,
+            route_overlay_dir,
+            speed_overlay_dir,
+            raw_output_dir,
         )
 
     def _process_cached_payload(
@@ -194,6 +214,7 @@ class GenericAttentionActionVisualizer:
         suffix: str,
         route_overlay_dir: Optional[Path],
         speed_overlay_dir: Optional[Path],
+        raw_output_dir: Optional[Path] = None,
     ) -> Path:
         attention_maps = payload.get("attention") or {}
         target_info = payload.get("target_info", {})
@@ -211,11 +232,10 @@ class GenericAttentionActionVisualizer:
         token_scores = relevance[source_index, image_token_positions]
         heatmap = self._scores_to_heatmap(token_scores.clone().detach().to(self.device), meta)
         
-        # Save Raw Heatmap (Grayscale)
-        heatmap_np = heatmap
-        heatmap_uint8 = np.uint8(255 * heatmap_np)
-        raw_output_path = output_dir / f"{image_path.stem}_raw.png"
-        Image.fromarray(heatmap_uint8).save(raw_output_path)
+        if raw_output_dir:
+            heatmap_uint8 = np.uint8(255 * heatmap)
+            raw_path = raw_output_dir / f"{image_path.stem}.png"
+            Image.fromarray(heatmap_uint8).save(raw_path)
 
         # Save Overlay
         overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)

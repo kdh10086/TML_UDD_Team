@@ -83,10 +83,21 @@ class VisionRawAttention:
         # self.payload_root is already set above
         self._payload_index = self._index_payloads(self.payload_root)
 
-    def generate_scene_heatmaps(self, scene_dir: Optional[Path], output_dir: Path, suffix: str = "vit_raw") -> None:
+    def generate_scene_heatmaps(
+        self,
+        scene_dir: Optional[Path],
+        output_dir: Path,
+        suffix: str = "vit_raw",
+        raw_output_dir: Optional[Path] = None,
+    ) -> None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         scenario_output_dir = self._prepare_output_subdir(output_dir, scene_dir, suffix)
+        scenario_raw_output_dir = None
+        if raw_output_dir:
+            raw_output_dir = Path(raw_output_dir)
+            raw_output_dir.mkdir(parents=True, exist_ok=True)
+            scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
         if not self._payload_index:
             raise RuntimeError("No payloads found under payload_root.")
         for tag, payload_path in sorted(self._payload_index.items()):
@@ -94,7 +105,7 @@ class VisionRawAttention:
             image_path = self._resolve_image_path(payload, scene_dir)
             route_dir, speed_dir = resolve_overlay_dirs(image_path.parent, self.trajectory_overlay_root)
             self._process_cached_payload(
-                payload, image_path, scenario_output_dir, suffix, route_dir, speed_dir
+                payload, image_path, scenario_output_dir, suffix, route_dir, speed_dir, scenario_raw_output_dir
             )
 
     def _process_cached_payload(
@@ -105,6 +116,7 @@ class VisionRawAttention:
         suffix: str,
         route_overlay_dir: Optional[Path],
         speed_overlay_dir: Optional[Path],
+        raw_output_dir: Optional[Path] = None,
     ) -> Path:
         attention_maps = payload.get("attention") or {}
         meta = payload.get("meta")
@@ -114,6 +126,13 @@ class VisionRawAttention:
         attention_tensor = self._select_layer_attention(moved)
         token_scores = self._extract_image_scores(attention_tensor, meta["num_total_image_tokens"])
         heatmap = self._scores_to_heatmap(token_scores, meta)
+        heatmap = self._scores_to_heatmap(token_scores, meta)
+        
+        if raw_output_dir:
+            heatmap_uint8 = np.uint8(255 * heatmap)
+            raw_path = raw_output_dir / f"{image_path.stem}.png"
+            Image.fromarray(heatmap_uint8).save(raw_path)
+
         overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)
         output_path = output_dir / f"{image_path.stem}_{suffix}.png"
         Image.fromarray(overlay).save(output_path)
@@ -364,7 +383,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--payload_root",
         type=Path,
-        type=Path,
         default=None,
         help="Path to cached .pt payload directory (optional, defaults to scene_dir/pt).",
     )
@@ -380,7 +398,6 @@ def main() -> None:
         head_strategy=args.head_strategy,
         colormap=args.colormap,
         alpha=args.alpha,
-        trajectory_overlay_root=args.trajectory_overlay_root,
         trajectory_overlay_root=args.trajectory_overlay_root,
         scene_dir=args.scene_dir,
         payload_root=args.payload_root,
