@@ -169,6 +169,27 @@ def _patched_greedy_sample_llama(
     return sampled_tokens, input_embeds
 
 
+def _patched_llm_forward(
+    self,
+    embeddings: Tensor,
+    attention_mask: Optional[Tensor] = None,
+    return_dict: bool = True,
+    position_ids: Optional[Tensor] = None,
+):
+    """Wrap LLM.forward to force attentions on, without editing external sources."""
+    outputs = self.model(
+        inputs_embeds=embeddings,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+        output_attentions=True,
+        position_ids=position_ids,
+        return_dict=return_dict,
+    )
+    features = outputs.hidden_states[-1]
+    logits = outputs[0]
+    return features, logits
+
+
 def patch_simlingo() -> None:
     """Apply monkey patches to Sim-Lingo language models."""
     try:
@@ -177,6 +198,7 @@ def patch_simlingo() -> None:
         LLM = None
     if LLM is not None:
         LLM.greedy_sample = _patched_greedy_sample_llm
+        LLM.forward = _patched_llm_forward
 
     try:
         from simlingo_base_training.models.language_model.llama import Llama
@@ -184,4 +206,3 @@ def patch_simlingo() -> None:
         Llama = None
     if Llama is not None:
         Llama.greedy_sample = _patched_greedy_sample_llama
-
