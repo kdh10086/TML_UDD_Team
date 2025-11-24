@@ -35,6 +35,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SIMLINGO_SRC = REPO_ROOT / "external" / "simlingo"
 if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
     sys.path.insert(0, str(SIMLINGO_SRC))
+# Use locally patched InternVL2 module cache (copied to experiment/InternVL2-1B)
+LOCAL_HF_MODULES = REPO_ROOT / "experiment" / "InternVL2-1B"
+if LOCAL_HF_MODULES.exists():
+    os.environ["HF_MODULES_CACHE"] = str(LOCAL_HF_MODULES.resolve())
 
 from simlingo_training.models.driving import DrivingModel
 from simlingo_training.models.encoder import internvl2_model as ivl
