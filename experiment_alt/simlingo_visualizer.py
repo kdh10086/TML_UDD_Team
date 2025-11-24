@@ -607,7 +607,7 @@ class SimLingoVisualizer:
         
         # Robust Normalization
         # If max == min, normalize returns 0. Avoid this.
-        if heatmap_22.max() == heatmap_2d.min():
+        if heatmap_2d.max() == heatmap_2d.min():
             heatmap_norm = np.zeros_like(heatmap_2d, dtype=np.uint8)
         else:
             heatmap_norm = cv2.normalize(heatmap_2d, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
