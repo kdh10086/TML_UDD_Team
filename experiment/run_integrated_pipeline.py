@@ -232,19 +232,31 @@ def main():
         # --- Inference Action ---
         print("[Pipeline] Running Inference (Action)...")
         inference_runner.explain_mode = "action"
-        inference_runner.run_batch(batch_files, inference_action_dir, scenario_path)
+        # Capture the actual output directory (which includes timestamp)
+        actual_action_dir = inference_runner.run_batch(batch_files, inference_action_dir, scenario_path)
         
+        # Update pt_source for action visualizers
+        # The PT files are in actual_action_dir / "pt"
+        pt_action_source = actual_action_dir / "pt"
+        for viz in action_visualizers:
+            viz["pt_source"] = pt_action_source
+
         # --- Visualizations (Action) ---
-        print("[Pipeline] Running Visualizations (Action-dependent)...")
+        print(f"[Pipeline] Running Visualizations (Action-dependent)... PT Source: {pt_action_source}")
         run_visualizers_for_batch(action_visualizers, batch_files)
         
         # --- Inference Text ---
         print("[Pipeline] Running Inference (Text)...")
         inference_runner.explain_mode = "text"
-        inference_runner.run_batch(batch_files, inference_text_dir, scenario_path)
+        actual_text_dir = inference_runner.run_batch(batch_files, inference_text_dir, scenario_path)
         
+        # Update pt_source for text visualizers
+        pt_text_source = actual_text_dir / "pt"
+        for viz in text_visualizers:
+            viz["pt_source"] = pt_text_source
+            
         # --- Visualizations (Text) ---
-        print("[Pipeline] Running Visualizations (Text-dependent)...")
+        print(f"[Pipeline] Running Visualizations (Text-dependent)... PT Source: {pt_text_source}")
         run_visualizers_for_batch(text_visualizers, batch_files)
 
     print(f"\n[Pipeline] Done! Results saved to {base_output_dir}")

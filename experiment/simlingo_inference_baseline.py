@@ -1056,7 +1056,7 @@ class SimLingoInferenceBaseline:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def run_batch(self, image_paths: List[Path], output_dir: Path, scene_dir: Path) -> None:
+    def run_batch(self, image_paths: List[Path], output_dir: Path, scene_dir: Path) -> Path:
         """Run inference on a batch of images."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1074,6 +1074,8 @@ class SimLingoInferenceBaseline:
         
         for image_path in tqdm(image_paths, desc=f"Batch ({self.explain_mode})", unit="img"):
             self._process_single_frame(image_path, speed_table, scenario_subdirs, scenario_output_dir)
+            
+        return scenario_output_dir
 
     def run_scene(self, scene_dir: Path, output_dir: Path) -> None:
         """시나리오 디렉토리(하위 images/)의 모든 이미지를 순회하며 추론 결과를 저장합니다."""
