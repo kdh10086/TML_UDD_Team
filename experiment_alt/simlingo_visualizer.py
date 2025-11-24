@@ -178,7 +178,10 @@ class SimLingoVisualizer:
         
         # Enable gradients for explanation
         for param in model.parameters():
-            param.requires_grad = True  # Needed for gradient-based explanation methods
+            param.requires_grad = True
+            
+        # Verify requires_grad
+        print(f"Model Parameter requires_grad check: {next(model.parameters()).requires_grad}")
             
         # Configure model to output attentions
         model.language_model.model.config.output_attentions = True
@@ -193,6 +196,27 @@ class SimLingoVisualizer:
         # Also manually check config
         model.language_model.model.config.gradient_checkpointing = False
         model.vision_model.image_encoder.model.config.gradient_checkpointing = False
+        
+        # Force Eager Attention (Disable Flash Attention)
+        # Flash Attention kernels often do not compute gradients w.r.t attention weights (only Q,K,V).
+        # We need vanilla attention to get d(Loss)/d(AttnWeights).
+        print("Forcing Eager Attention Implementation to capture attention gradients...")
+        if hasattr(model.language_model.model.config, "attn_implementation"):
+            model.language_model.model.config.attn_implementation = "eager"
+        if hasattr(model.vision_model.image_encoder.model.config, "attn_implementation"):
+            model.vision_model.image_encoder.model.config.attn_implementation = "eager"
+            
+        # Some HF models use _attn_implementation
+        if hasattr(model.language_model.model.config, "_attn_implementation"):
+            model.language_model.model.config._attn_implementation = "eager"
+        if hasattr(model.vision_model.image_encoder.model.config, "_attn_implementation"):
+            model.vision_model.image_encoder.model.config._attn_implementation = "eager"
+        
+        # Force model to train mode to ensure gradients are tracked (sometimes eval disables specific hooks)
+        # But we want deterministic behavior, so we can set eval() but ensure grad is enabled.
+        # PyTorch eval() does NOT disable gradient calculation, torch.no_grad() does.
+        # However, some custom models might have specific flags.
+        model.eval() 
 
         return model
 
