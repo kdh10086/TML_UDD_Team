@@ -289,6 +289,7 @@ class VisionRawAttention:
             attn = attn.max(dim=1).values
         return attn
 
+    def _extract_image_scores(self, attn: torch.Tensor, num_image_tokens: int) -> torch.Tensor:
         # experiment_alt logic:
         # attn = vision_maps[last_name].float()
         # return attn.mean(dim=1)[-1, 1:, 1:].sum(dim=0)
