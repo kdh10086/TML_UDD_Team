@@ -142,9 +142,46 @@ data/<dataset>/<scenario>/
     --text_token_strategy max \
     --text_token_index -1 \
     --kinematic_metric curv_energy \
-    --image_size 448 \
+    --image_size 224 \
     --max_patches 2
   ```
+### kinematic_metric 이름 -> 사용 토큰(source)/함수/설명 매핑
+KINEMATIC_METRICS = {
+    "curv_energy": {"source": "route", "fn": compute_curvature_energy, "description": "곡률 제곱합"},
+    "curv_diff": {
+        "source": "route",
+        "fn": compute_curvature_diff,
+        "description": "곡률 변화 제곱합",
+    },
+    "longitudinal_progress": {
+        "source": "speed",
+        "fn": compute_longitudinal_progress,
+        "description": "종방향 전진 거리",
+    },
+    "forward_speed": {
+        "source": "speed",
+        "fn": compute_forward_speed,
+        "description": "평균 전진 속도",
+    },
+    "acc_energy": {
+        "source": "speed",
+        "fn": compute_acceleration_energy,
+        "description": "종방향 가속도 에너지",
+    },
+    "brake_energy": {
+        "source": "speed",
+        "fn": compute_brake_energy,
+        "description": "제동(감속) 에너지",
+    },
+    "jerk_energy": {
+        "source": "speed",
+        "fn": compute_jerk_energy,
+        "description": "종방향 jerk 에너지",
+    },
+    "none": {"source": None, "fn": None, "description": "절댓값 합을 사용하는 예비 설정"},
+}
+TEXT_TOKEN_STRATEGIES = ("max", "last", "index")
+
   - `--gpu_ids`를 주면 GPU별 별도 프로세스를 띄워 `--scene_dirs`를 균등 배분합니다.
 - tqdm로 시나리오 단위 진행률 표시.
 - 입력 속도는 `video_garmin_speed`의 m/s를 자동 주입. 없으면 0 m/s 폴백.
