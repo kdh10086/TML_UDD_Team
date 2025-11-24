@@ -901,8 +901,25 @@ class SimLingoInferenceBaseline:
             
             # Fallback: check outputs just in case
             if attn_seq is None:
-                attn_seq = getattr(outputs, "attentions", None)
-                # print(f"[DEBUG] Fallback to outputs.attentions: {len(attn_seq) if attn_seq else 0} layers")
+                if hasattr(outputs, "attentions"):
+                    attn_seq = outputs.attentions
+                elif isinstance(outputs, tuple):
+                    # Try to find the tuple element that looks like attentions (tuple of tensors)
+                    for item in outputs:
+                        if isinstance(item, (list, tuple)) and len(item) > 0 and torch.is_tensor(item[0]):
+                            # Assume this is the attentions tuple (usually length=num_layers)
+                            # Qwen2 has 24 layers.
+                            if len(item) >= 10: # Heuristic check
+                                attn_seq = item
+                                break
+                    # If still not found, maybe it's the last element?
+                    if attn_seq is None and len(outputs) > 0:
+                         # Last element is often attentions if output_attentions=True
+                         last_item = outputs[-1]
+                         if isinstance(last_item, (list, tuple)):
+                             attn_seq = last_item
+
+                # print(f"[DEBUG] Fallback to outputs search: {len(attn_seq) if attn_seq else 0} layers")
 
             if attn_seq:
                 for idx, attn in enumerate(attn_seq):
