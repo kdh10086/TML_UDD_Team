@@ -149,7 +149,7 @@ class VisionAttentionRollout:
         heatmap = self._scores_to_heatmap(token_scores, meta)
         
         if raw_output_dir:
-            heatmap_uint8 = np.uint8(255 * heatmap.cpu().numpy())
+            heatmap_uint8 = np.uint8(255 * heatmap.float().cpu().numpy())
             raw_path = raw_output_dir / f"{image_path.stem}.png"
             Image.fromarray(heatmap_uint8).save(raw_path)
 
