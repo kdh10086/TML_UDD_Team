@@ -946,6 +946,9 @@ class SimLingoInferenceBaseline:
                 for idx, attn in enumerate(attn_seq):
                     if attn is None:
                         continue
+                    if not torch.is_tensor(attn):
+                         # Skip non-tensor elements (e.g. if we accidentally picked up a tuple of strings)
+                         continue
                     attn_tensor = attn.detach().to("cpu")
                     grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
                     
