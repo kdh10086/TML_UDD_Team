@@ -122,7 +122,11 @@ class GenericAttentionTextVisualizer:
             scenario_raw_output_dir = self._prepare_output_subdir(raw_output_dir, scene_dir, "raw")
         
         # Resolve payload root
-        if self.explicit_payload_root:
+        # Resolve payload root
+        if self.payload_root and self.payload_root.exists():
+            # Use already set payload_root (e.g. from pipeline)
+            pass
+        elif self.explicit_payload_root:
             self.payload_root = self._resolve_payload_root(self.explicit_payload_root, self.trajectory_overlay_root)
         else:
             # Default to scene_dir/pt
