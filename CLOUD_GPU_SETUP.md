@@ -194,25 +194,22 @@ TEXT_TOKEN_STRATEGIES = ("max", "last", "index")
 - 루트에서 실행 예시(샘플 데이터, 액션 모드 캐시):
 ```bash
 # Raw attention
-python -m experiment.vit_raw_attention \
+ python -m experiment.vit_raw_attention \
+  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
   --output_dir experiment_outputs/vit_raw \
-  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --scene_dir data/sample_scene \
   --layer_index -1 --head_strategy mean --colormap JET --alpha 0.5
 
 # Attention rollout
  python -m experiment.vit_attention_rollout \
+  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
   --output_dir experiment_outputs/vit_rollout \
-  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --scene_dir data/sample_scene \
-  --residual_alpha 0.5 --start_layer 0 --colormap JET --alpha 0.5
+  --start_layer 0 --residual_alpha 0.5 --colormap JET --alpha 0.5
 
 # Attention flow
  python -m experiment.vit_attention_flow \
+  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
   --output_dir experiment_outputs/vit_flow \
-  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
-  --scene_dir data/sample_scene \
-  --residual_alpha 0.5 --discard_ratio 0.0 --colormap JET --alpha 0.5
+  --discard_ratio 0.9 --residual_alpha 0.5 --colormap JET --alpha 0.5
 ```
 - 캐시가 없으면 실행 불가(모델 재실행 없음). `.pt`에 비전 어텐션이 포함돼 있는지 먼저 확인하세요.
 
@@ -235,7 +232,7 @@ python -m experiment.vit_raw_attention \
   --colormap JET \
   --alpha 0.5
 ```
-- `--payload_root`는 필수이며, 모델을 다시 돌리지 않습니다.
+- `--payload_root`는 선택 사항이며, 생략 시 `--scene_dir/pt`를 자동으로 탐색합니다.
 
 ## 압축/전송(참고, zip 기준)
 - 압축(현재 경로에 폴더가 있을 때): `zip -r <압축할파일이름>.zip <폴더이름>`  

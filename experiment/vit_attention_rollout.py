@@ -41,10 +41,25 @@ class VisionAttentionRollout:
         colormap: str = "JET",
         alpha: float = 0.5,
         trajectory_overlay_root: Optional[Path] = None,
+        scene_dir: Optional[Path] = None,
         payload_root: Optional[Path] = None,
     ) -> None:
         if payload_root is None:
-            raise ValueError("payload_root(.pt 디렉터리)이 필요합니다.")
+            if scene_dir is None:
+                raise ValueError("Either scene_dir or payload_root must be provided.")
+            payload_root = Path(scene_dir) / "pt"
+        
+        self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
+        if self.payload_root is None and scene_dir is not None:
+             # Fallback: try to find pt in scene_dir directly or subdirs
+             candidates = [Path(scene_dir) / "pt", Path(scene_dir)]
+             for c in candidates:
+                 if c.exists() and any(c.glob("*.pt")):
+                     self.payload_root = c
+                     break
+        
+        if self.payload_root is None:
+             raise ValueError(f"Could not find payload directory (pt files) in {payload_root} or {scene_dir}")
         if not (0.0 <= residual_alpha <= 1.0):
             raise ValueError("residual_alpha must lie in [0, 1].")
         self.config_path = Path(config_path)
@@ -62,7 +77,8 @@ class VisionAttentionRollout:
             raise ValueError("alpha must be between 0 and 1.")
         self.alpha = alpha
         self.trajectory_overlay_root = trajectory_overlay_root
-        self.payload_root = self._resolve_payload_root(payload_root, trajectory_overlay_root)
+        self.trajectory_overlay_root = trajectory_overlay_root
+        # self.payload_root is already set above
         self._payload_index = self._index_payloads(self.payload_root)
 
     def generate_scene_heatmaps(self, scene_dir: Optional[Path], output_dir: Path, suffix: str = "vit_rollout") -> None:
@@ -341,8 +357,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--payload_root",
         type=Path,
-        required=True,
-        help="Path to cached .pt payload directory (or its parent).",
+        type=Path,
+        default=None,
+        help="Path to cached .pt payload directory (optional, defaults to scene_dir/pt).",
     )
     return parser.parse_args()
 
@@ -357,6 +374,8 @@ def main() -> None:
         colormap=args.colormap,
         alpha=args.alpha,
         trajectory_overlay_root=args.trajectory_overlay_root,
+        trajectory_overlay_root=args.trajectory_overlay_root,
+        scene_dir=args.scene_dir,
         payload_root=args.payload_root,
     )
     runner.generate_scene_heatmaps(args.scene_dir, args.output_dir, suffix=args.suffix)
