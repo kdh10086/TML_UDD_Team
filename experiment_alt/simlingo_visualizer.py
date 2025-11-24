@@ -318,8 +318,10 @@ class SimLingoVisualizer:
                 self.attn_maps[name] = attn.detach()
                 
                 if save_grad:
+                    # Hook for backward pass to capture gradients
                     def grad_hook(grad):
                         self.grad_maps[name] = grad.detach()
+                    # Register the hook on the tensor we just captured
                     attn.register_hook(grad_hook)
             return hook
 
@@ -373,6 +375,11 @@ class SimLingoVisualizer:
         outputs = self.model(driving_input)
         pred_speed_wps, pred_route, _ = outputs
         
+        # Debug: Check output gradients
+        print(f"Pred Route Requires Grad: {pred_route.requires_grad}")
+        if not pred_route.requires_grad:
+            print("CRITICAL WARNING: Model output does not require gradients. Check model configuration.")
+        
         # Backward (if needed for Generic/Ours)
         if run_generic_or_ours:
             if explain_mode == "action":
@@ -399,6 +406,8 @@ class SimLingoVisualizer:
                     print(f"Grad Map [{last_key}] Mean: {self.grad_maps[last_key].float().mean():.6e}, Max: {self.grad_maps[last_key].max():.6e}")
                 else:
                     print("WARNING: No gradients captured in grad_maps!")
+            else:
+                print("CRITICAL: Target does not require grad, cannot backward.")
         
         # Generate Visualizations
         for method in methods:
