@@ -141,7 +141,26 @@ class InternVLChatModel(PreTrainedModel):
         # Stash attentions for external access (since DrivingModel might discard them)
         if hasattr(outputs, "attentions"):
             self.all_attentions = outputs.attentions
-        logits = outputs.logits
+            # print(f"[DEBUG] Stashed {len(self.all_attentions)} attention layers in InternVLChatModel (obj)")
+        elif isinstance(outputs, tuple):
+            # Qwen2ForCausalLM might return tuple if return_dict=False
+            # Structure: (loss), logits, past_key_values, hidden_states, attentions
+            # If output_attentions=True, attentions is usually the last element?
+            # Let's check length.
+            # If return_dict=False: (loss), logits, past_key_values, hidden_states, attentions
+            # loss is present if labels provided. Here labels=None.
+            # So: logits, past_key_values, hidden_states, attentions
+            # attentions is at index -1.
+            self.all_attentions = outputs[-1]
+            # print(f"[DEBUG] Stashed {len(self.all_attentions)} attention layers in InternVLChatModel (tuple)")
+        else:
+            # print("[DEBUG] No attentions found in outputs of language_model")
+            self.all_attentions = None
+        
+        if hasattr(outputs, "logits"):
+            logits = outputs.logits
+        else:
+            logits = outputs[0]
 
         loss = None
         if labels is not None:

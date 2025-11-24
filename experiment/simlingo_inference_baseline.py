@@ -894,12 +894,15 @@ class SimLingoInferenceBaseline:
             # Try to find stashed attentions in the model hierarchy
             if hasattr(self.model, "language_model") and hasattr(self.model.language_model, "all_attentions"):
                  attn_seq = self.model.language_model.all_attentions
+                 # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.all_attentions")
             elif hasattr(self.model, "language_model") and hasattr(self.model.language_model, "model") and hasattr(self.model.language_model.model, "all_attentions"):
                  attn_seq = self.model.language_model.model.all_attentions
+                 # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.model.all_attentions")
             
             # Fallback: check outputs just in case
             if attn_seq is None:
                 attn_seq = getattr(outputs, "attentions", None)
+                # print(f"[DEBUG] Fallback to outputs.attentions: {len(attn_seq) if attn_seq else 0} layers")
 
             if attn_seq:
                 for idx, attn in enumerate(attn_seq):
