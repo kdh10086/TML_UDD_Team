@@ -758,9 +758,6 @@ class SimLingoVisualizer:
         # Extract Relevance of Image Tokens w.r.t Target
         # Target is usually the last token (or the token where classification happens)
         # In SimLingo action mode, we pool or use the last token.
-        # Let's assume the last token in the sequence is the "source" of relevance.
-        # R[0, last_token_idx, :] -> Relevance of all tokens to the last token.
-        
         # Note: R is [B, S, S]. R[b, i, j] is relevance of token j to token i.
         # We want relevance OF image tokens TO the target token.
         # So we look at row 'target_idx'.
@@ -780,11 +777,24 @@ class SimLingoVisualizer:
         
         # If we have more tokens than num_tokens, it means we have tiles. Take the last ones.
         if len(image_indices) > num_tokens:
-            print(f"[Generic] Selecting last {num_tokens} tokens (Global View) from {len(image_indices)} total image tokens.")
+            print(f"[Ours] Selecting last {num_tokens} tokens (Global View) from {len(image_indices)} total image tokens.")
             image_indices = image_indices[-num_tokens:]
         else:
-            print(f"[Generic] Found {len(image_indices)} tokens (likely just Global View).")
+            print(f"[Ours] Found {len(image_indices)} tokens (likely just Global View).")
             
+        # DEBUG: Check why R is 0
+        print(f"[Ours] Final R Matrix Stats - Mean: {R.mean():.6e}, Max: {R.max():.6e}")
+        print(f"[Ours] R[0, target_idx, image_indices] Stats - Mean: {R[0, target_idx, image_indices].mean():.6e}")
+        
+        # DEBUG: Check Raw CAM for the last layer specifically for these indices
+        last_name = sorted_keys[-1]
+        last_attn = lm_maps[last_name].float()
+        last_grad = grad_maps.get(last_name, torch.zeros_like(last_attn)).float()
+        last_raw_cam = last_attn * last_grad
+        print(f"[Ours] Layer {last_name} - Raw CAM[target, image] Mean: {last_raw_cam[0, :, target_idx, image_indices].mean():.6e}")
+        print(f"[Ours] Layer {last_name} - Grad[target, image] Mean: {last_grad[0, :, target_idx, image_indices].mean():.6e}")
+        print(f"[Ours] Layer {last_name} - Attn[target, image] Mean: {last_attn[0, :, target_idx, image_indices].mean():.6e}")
+
         # Extract scores
         # For LLM, B is usually 1 (unless batching multiple prompts).
         # We take batch 0.
