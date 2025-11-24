@@ -39,14 +39,24 @@ if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
     sys.path.insert(0, str(SIMLINGO_SRC))
 # Use locally patched InternVL2 module cache (copied to experiment/InternVL2-1B)
 LOCAL_HF_MODULES = REPO_ROOT / "experiment" / "InternVL2-1B"
-if LOCAL_HF_MODULES.exists():
-    os.environ["HF_MODULES_CACHE"] = str(LOCAL_HF_MODULES.resolve())
+LOCAL_TFMM_ROOT = REPO_ROOT / "experiment" / "transformers_modules"
+LOCAL_HASHED = LOCAL_HF_MODULES / "0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187"
 
 # Force-import patched InternVL2 modules so AutoModel uses them instead of downloading
 def _register_local_internvl_modules():
-    base = LOCAL_HF_MODULES / "0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187"
+    base = LOCAL_HASHED
     if not base.exists():
         return
+
+    # ensure transformers_modules/OpenGVLab/InternVL2-1B/<hash> exists (copy if missing)
+    tfm_base = LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B" / base.name
+    tfm_base.mkdir(parents=True, exist_ok=True)
+    for fname in ["modeling_internvl_chat.py", "configuration_intern_vit.py", "modeling_intern_vit.py", "conversation.py", "__init__.py"]:
+        src = base / fname
+        dst = tfm_base / fname
+        if src.exists():
+            if not dst.exists():
+                shutil.copy2(src, dst)
 
     # Ensure package hierarchy exists for relative imports
     def _ensure_pkg(name: str, path: Path):
@@ -56,15 +66,16 @@ def _register_local_internvl_modules():
         pkg.__path__ = [str(path)]
         sys.modules[name] = pkg
 
-    _ensure_pkg("transformers_modules", base.parent)
-    _ensure_pkg("transformers_modules.OpenGVLab", base.parent / "OpenGVLab")
-    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", base)
+    _ensure_pkg("transformers_modules", LOCAL_TFMM_ROOT)
+    _ensure_pkg("transformers_modules.OpenGVLab", LOCAL_TFMM_ROOT / "OpenGVLab")
+    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B")
+    _ensure_pkg(f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}", tfm_base)
 
     module_map = {
-        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_internvl_chat": base / "modeling_internvl_chat.py",
-        "transformers_modules.OpenGVLab.InternVL2-1B.configuration_intern_vit": base / "configuration_intern_vit.py",
-        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_intern_vit": base / "modeling_intern_vit.py",
-        "transformers_modules.OpenGVLab.InternVL2-1B.conversation": base / "conversation.py",
+        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_internvl_chat": tfm_base / "modeling_internvl_chat.py",
+        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.configuration_intern_vit": tfm_base / "configuration_intern_vit.py",
+        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_intern_vit": tfm_base / "modeling_intern_vit.py",
+        f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.conversation": tfm_base / "conversation.py",
     }
     for mod_name, path in module_map.items():
         if not path.exists():
