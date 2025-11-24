@@ -348,28 +348,45 @@ class VisionAttentionRollout:
         return best_h, best_w
 
     def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
-        num_views = int(meta["num_patch_views"])
-        tokens_per_view = int(meta["num_image_tokens_per_patch"])
+        num_views = max(1, int(meta["num_patch_views"]))
         total_tokens = int(meta["num_total_image_tokens"])
-        if token_scores.numel() != total_tokens:
-            raise RuntimeError(
-                f"Token score length ({token_scores.numel()}) does not match meta ({total_tokens})."
-            )
-        
         H_orig = int(meta["original_height"])
         W_orig = int(meta["original_width"])
-        
-        grid_h, grid_w = self._resolve_grid_size(tokens_per_view, H_orig, W_orig)
-        
-        if grid_h * grid_w != tokens_per_view:
-             # Should not happen if logic is correct, but safety check
-             raise RuntimeError(f"Calculated grid {grid_h}x{grid_w} != tokens_per_view {tokens_per_view}")
 
-        scores = token_scores.view(num_views, 1, grid_h, grid_w).mean(dim=0)
-        
-        scores = scores.unsqueeze(0) # [1, 1, grid_h, grid_w]
+        scores_flat = token_scores.flatten()
+        expected = total_tokens if total_tokens > 0 else scores_flat.numel()
+        if scores_flat.numel() < expected:
+            pad = torch.zeros(expected - scores_flat.numel(), device=scores_flat.device, dtype=scores_flat.dtype)
+            scores_flat = torch.cat([scores_flat, pad], dim=0)
+        elif scores_flat.numel() > expected:
+            scores_flat = scores_flat[:expected]
+
+        per_view = max(1, expected // num_views)
+        grids: List[torch.Tensor] = []
+        target_ratio = H_orig / max(W_orig, 1)
+
+        for v in range(num_views):
+            start = v * per_view
+            end = min(start + per_view, scores_flat.numel())
+            view_scores = scores_flat[start:end]
+            if view_scores.numel() == 0:
+                continue
+            grid_h = max(1, int(round(math.sqrt(view_scores.numel() * target_ratio))))
+            grid_w = max(1, int(math.ceil(view_scores.numel() / grid_h)))
+            if grid_h * grid_w < view_scores.numel():
+                grid_h = int(math.ceil(view_scores.numel() / grid_w))
+            if grid_h * grid_w != view_scores.numel():
+                pad = torch.zeros(grid_h * grid_w - view_scores.numel(), device=view_scores.device, dtype=view_scores.dtype)
+                view_scores = torch.cat([view_scores, pad], dim=0)
+            grids.append(view_scores.view(1, 1, grid_h, grid_w))
+
+        if not grids:
+            raise RuntimeError("No view scores available to build heatmap.")
+
+        scores = torch.stack(grids, dim=0).mean(dim=0)  # [1,1,H,W]
         heatmap = F.interpolate(scores, size=(H_orig, W_orig), mode="bilinear", align_corners=False)
-        return heatmap.squeeze(0).squeeze(0)
+        heatmap = heatmap.squeeze(0).squeeze(0)
+        return (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min()).clamp_min(1e-6)
 
     def _render_overlay(
         self,

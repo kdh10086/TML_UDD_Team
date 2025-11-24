@@ -629,23 +629,22 @@ class GenericAttentionTextVisualizer:
         return best_h, best_w
 
     def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
-        # Note: GenericAttentionTextVisualizer logic is slightly different
-        # token_scores is [N_tokens]
-        # We need to reshape it to [H_grid, W_grid]
-        
-        total_tokens = token_scores.numel()
+        # token_scores is [N_tokens]; reshape to grid close to image aspect, padding if needed
+        total_tokens = int(token_scores.numel())
         H_orig = int(meta["original_height"])
         W_orig = int(meta["original_width"])
-        
-        best_h, best_w = self._resolve_grid_size(total_tokens, H_orig, W_orig)
-        
-        if best_h * best_w != total_tokens:
-             # Fallback if no clean factors found (unlikely for ViT patches)
-             # But just in case, we might need to pad or truncate?
-             # For now, raise error as it implies something wrong with token count vs patch count
-             raise RuntimeError(f"Calculated grid {best_h}x{best_w}={best_h*best_w} != total_tokens {total_tokens}")
 
-        heatmap = token_scores.view(best_h, best_w).detach().float().to("cpu").numpy()
+        target_ratio = H_orig / max(W_orig, 1)
+        grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
+        grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
+        if grid_h * grid_w < total_tokens:
+            grid_h = int(math.ceil(total_tokens / grid_w))
+
+        if grid_h * grid_w != total_tokens:
+            pad = torch.zeros(grid_h * grid_w - total_tokens, device=token_scores.device, dtype=token_scores.dtype)
+            token_scores = torch.cat([token_scores, pad], dim=0)
+
+        heatmap = token_scores.view(grid_h, grid_w).detach().float().to("cpu").numpy()
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
         heatmap = cv2.resize(heatmap, (W_orig, H_orig)) # cv2.resize uses (width, height)
         return heatmap

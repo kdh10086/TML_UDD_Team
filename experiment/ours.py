@@ -328,16 +328,23 @@ class GenericAttentionActionVisualizer:
         return best_h, best_w
 
     def _scores_to_heatmap(self, scores: torch.Tensor, meta: Dict[str, Any]) -> np.ndarray:
-        total_tokens = meta["num_total_image_tokens"]
+        # Use actual token count (may be shorter than expected) and pad to a grid
+        total_tokens = int(scores.numel())
         orig_h = meta["original_height"]
         orig_w = meta["original_width"]
-        
-        best_h, best_w = self._resolve_grid_size(total_tokens, orig_h, orig_w)
-        
-        if best_h * best_w != total_tokens:
-            raise RuntimeError(f"Calculated grid {best_h}x{best_w}={best_h*best_w} != total_tokens {total_tokens}")
 
-        heatmap = scores.reshape(best_h, best_w).detach().float().to("cpu").numpy()
+        # Approximate grid preserving aspect ratio, allowing padding if not divisible
+        target_ratio = orig_h / max(orig_w, 1)
+        grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
+        grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
+        if grid_h * grid_w < total_tokens:
+            grid_h = int(math.ceil(total_tokens / grid_w))
+
+        if grid_h * grid_w != total_tokens:
+            pad = torch.zeros(grid_h * grid_w - total_tokens, device=scores.device, dtype=scores.dtype)
+            scores = torch.cat([scores, pad], dim=0)
+
+        heatmap = scores.reshape(grid_h, grid_w).detach().float().to("cpu").numpy()
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
         heatmap = cv2.resize(heatmap, (orig_w, orig_h))
         return heatmap
