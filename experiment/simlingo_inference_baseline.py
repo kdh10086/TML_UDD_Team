@@ -576,6 +576,12 @@ class SimLingoInferenceBaseline:
                 if hasattr(core, "encoder"):
                     for idx, block in enumerate(core.encoder.layers):
                         self.recorder.register_module(block, f"vision_block_{idx}", record_grad=False)
+                # attention submodules directly (to force per-layer attn capture)
+                for sub_name, sub_module in vision_model.named_modules():
+                    cls = sub_module.__class__.__name__.lower()
+                    if "attention" in cls:
+                        safe_name = sub_name.replace(".", "_")
+                        self.recorder.register_module(sub_module, f"vision_attn_{safe_name}", record_grad=False)
         # 언어 모델 블록 훅 등록
         if self.enable_language_hooks:
             lm = self.model.language_model.model
@@ -589,6 +595,12 @@ class SimLingoInferenceBaseline:
                 layers = []
             for idx, block in enumerate(layers):
                 self.recorder.register_module(block, f"language_block_{idx}", record_grad=True)
+                # register inner attention modules explicitly
+                for sub_name, sub_module in block.named_modules():
+                    cls = sub_module.__class__.__name__.lower()
+                    if "attention" in cls:
+                        safe_name = f"language_block_{idx}_" + sub_name.replace(".", "_")
+                        self.recorder.register_module(sub_module, safe_name, record_grad=True)
 
     def _build_scenario_name(self, scenario_dir: Path) -> str:
         """시나리오 경로에서 정렬/원본, city 번호, 시나리오 번호를 추출해 접두어를 만듭니다."""
