@@ -786,7 +786,7 @@ class SimLingoVisualizer:
         print(f"[Ours] Final R Matrix Stats - Mean: {R.mean():.6e}, Max: {R.max():.6e}")
         print(f"[Ours] R[0, target_idx, image_indices] Stats - Mean: {R[0, target_idx, image_indices].mean():.6e}")
         
-        # DEBUG: Analyze Gradient Flow in Last Layer
+        # DEBUG: Analyze Gradient Flow in Last Layer to find True Target
         last_name = sorted_keys[-1]
         last_attn = lm_maps[last_name].float()
         last_grad = grad_maps.get(last_name, torch.zeros_like(last_attn)).float()
@@ -794,18 +794,11 @@ class SimLingoVisualizer:
         # Check which tokens (Queries) have non-zero gradients
         # grad is [B, H, S, S]. We average over B, H, and Key(S) to see which Query(S) is active.
         query_grad_mag = last_grad.abs().mean(dim=(0, 1, 3)) # [S]
-        active_indices = torch.nonzero(query_grad_mag > 1e-7).squeeze().tolist()
         
-        if isinstance(active_indices, int): active_indices = [active_indices]
+        # Dynamically select target index based on max gradient
+        target_idx = torch.argmax(query_grad_mag).item()
+        print(f"[Ours] Dynamic Target Index: {target_idx} (Grad Mag: {query_grad_mag[target_idx]:.6e})")
         
-        print(f"[Ours] Layer {last_name} - Active Query Indices (Grad > 1e-7): {active_indices}")
-        print(f"[Ours] Layer {last_name} - Grad Magnitude at Target ({target_idx}): {query_grad_mag[target_idx]:.6e}")
-        
-        if active_indices:
-            # If target_idx is not active, suggest the most active one
-            max_idx = torch.argmax(query_grad_mag).item()
-            print(f"[Ours] Suggestion: Most active token is {max_idx} with mag {query_grad_mag[max_idx]:.6e}")
-
         # Extract scores
         # For LLM, B is usually 1 (unless batching multiple prompts).
         # We take batch 0.

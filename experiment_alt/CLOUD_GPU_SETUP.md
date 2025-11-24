@@ -18,9 +18,9 @@ cd TML_UDD_Team
 아래 명령어를 그대로 복사해서 터미널에 붙여넣고 엔터(Enter)를 누르세요.
 
 ```bash
-python3 experiment_alt2/simlingo_visualizer.py \
+python3 experiment_alt/simlingo_visualizer.py \
     --scene_dir data/sample/01 \
-    --output_dir experiment_outputs/simlingo_vis_alt2
+    --output_dir experiment_outputs/simlingo_vis_alt
 ```
 
 *   **`--scene_dir`**: 이미지가 들어있는 폴더 경로입니다. (예: `data/sample/01`)
@@ -30,7 +30,7 @@ python3 experiment_alt2/simlingo_visualizer.py \
 
 ## 3. 결과 확인하기
 
-실행이 완료되면 `experiment_outputs/simlingo_vis_alt2` 폴더에 이미지 파일들이 생성됩니다. 각 파일의 의미는 다음과 같습니다.
+실행이 완료되면 `experiment_outputs/simlingo_vis_alt` 폴더에 이미지 파일들이 생성됩니다. 각 파일의 의미는 다음과 같습니다.
 
 | 파일명 예시 | 설명 | 비고 |
 | :--- | :--- | :--- |
