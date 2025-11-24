@@ -48,15 +48,20 @@ def _register_local_internvl_modules():
     if not base.exists():
         return
 
-    # ensure transformers_modules/OpenGVLab/InternVL2-1B/<hash> exists (copy if missing)
-    tfm_base = LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B" / base.name
+    tfm_base = LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B"
     tfm_base.mkdir(parents=True, exist_ok=True)
-    for fname in ["modeling_internvl_chat.py", "configuration_intern_vit.py", "modeling_intern_vit.py", "conversation.py", "__init__.py"]:
+    for fname in [
+        "__init__.py",
+        "modeling_internvl_chat.py",
+        "configuration_intern_vit.py",
+        "configuration_internvl_chat.py",
+        "modeling_intern_vit.py",
+        "conversation.py",
+    ]:
         src = base / fname
         dst = tfm_base / fname
-        if src.exists():
-            if not dst.exists():
-                shutil.copy2(src, dst)
+        if src.exists() and not dst.exists():
+            shutil.copy2(src, dst)
 
     # Ensure package hierarchy exists for relative imports
     def _ensure_pkg(name: str, path: Path):
@@ -68,16 +73,15 @@ def _register_local_internvl_modules():
 
     _ensure_pkg("transformers_modules", LOCAL_TFMM_ROOT)
     _ensure_pkg("transformers_modules.OpenGVLab", LOCAL_TFMM_ROOT / "OpenGVLab")
-    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B")
-    _ensure_pkg(f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}", tfm_base)
+    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", tfm_base)
 
     module_map = [
-        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.__init__", tfm_base / "__init__.py"),
-        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.configuration_intern_vit", tfm_base / "configuration_intern_vit.py"),
-        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.configuration_internvl_chat", tfm_base / "configuration_internvl_chat.py"),
-        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_intern_vit", tfm_base / "modeling_intern_vit.py"),
-        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.conversation", tfm_base / "conversation.py"),
-        (f"transformers_modules.OpenGVLab.InternVL2-1B.{base.name}.modeling_internvl_chat", tfm_base / "modeling_internvl_chat.py"),
+        ("transformers_modules.OpenGVLab.InternVL2-1B.__init__", tfm_base / "__init__.py"),
+        ("transformers_modules.OpenGVLab.InternVL2-1B.configuration_intern_vit", tfm_base / "configuration_intern_vit.py"),
+        ("transformers_modules.OpenGVLab.InternVL2-1B.configuration_internvl_chat", tfm_base / "configuration_internvl_chat.py"),
+        ("transformers_modules.OpenGVLab.InternVL2-1B.modeling_intern_vit", tfm_base / "modeling_intern_vit.py"),
+        ("transformers_modules.OpenGVLab.InternVL2-1B.conversation", tfm_base / "conversation.py"),
+        ("transformers_modules.OpenGVLab.InternVL2-1B.modeling_internvl_chat", tfm_base / "modeling_internvl_chat.py"),
     ]
     for mod_name, path in module_map:
         if not path.exists():
