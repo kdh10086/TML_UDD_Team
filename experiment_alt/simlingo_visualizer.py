@@ -332,26 +332,38 @@ class SimLingoVisualizer:
         def get_hook(name, save_grad=False):
             def hook(module, input, output):
                 # output is usually (attn_output, attn_weights, ...)
-                if isinstance(output, tuple) and len(output) > 1:
-                    attn = output[1] # [B, H, S, S]
+                if isinstance(output, tuple):
+                    context = output[0]
+                    if len(output) > 1:
+                        attn = output[1] # [B, H, S, S]
+                    else:
+                        attn = None
                 else:
-                    return
+                    context = output
+                    attn = None
                 
+                # Debug: Check context gradients (Layer Output)
+                if save_grad and context.requires_grad:
+                    def context_grad_hook(grad):
+                        # Only print for first layer to avoid spam, or use a flag
+                        if "layer_0" in name and "vision" in name:
+                            print(f"DEBUG: Hook {name} Context (Output) Grad Mean: {grad.float().mean():.6e}")
+                    context.register_hook(context_grad_hook)
+
                 if attn is None: return
 
                 # Debug: Check if attn is attached to graph
-                # Only print for the first layer to avoid spam
                 if "layer_0" in name and "vision" in name:
                      print(f"Hook {name} captured attn. Shape: {attn.shape}, Requires Grad: {attn.requires_grad}")
 
                 self.attn_maps[name] = attn.detach()
                 
                 if save_grad:
-                    # Hook for backward pass to capture gradients
                     if attn.requires_grad:
                         def grad_hook(grad):
                             self.grad_maps[name] = grad.detach()
-                        # Register the hook on the tensor we just captured
+                            if "layer_0" in name and "vision" in name:
+                                print(f"DEBUG: Hook {name} Attn Grad Mean: {grad.float().mean():.6e}")
                         attn.register_hook(grad_hook)
                     else:
                         if "layer_0" in name and "vision" in name:
