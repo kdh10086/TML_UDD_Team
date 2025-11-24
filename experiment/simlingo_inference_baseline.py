@@ -39,29 +39,14 @@ if SIMLINGO_SRC.exists() and str(SIMLINGO_SRC) not in sys.path:
     sys.path.insert(0, str(SIMLINGO_SRC))
 # Use locally patched InternVL2 module cache (copied to experiment/InternVL2-1B)
 LOCAL_HF_MODULES = REPO_ROOT / "experiment" / "InternVL2-1B"
-LOCAL_TFMM_ROOT = REPO_ROOT / "experiment" / "transformers_modules"
-LOCAL_HASHED = LOCAL_HF_MODULES / "0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187"
+if LOCAL_HF_MODULES.exists():
+    os.environ["HF_MODULES_CACHE"] = str(LOCAL_HF_MODULES.resolve())
 
 # Force-import patched InternVL2 modules so AutoModel uses them instead of downloading
 def _register_local_internvl_modules():
-    base = LOCAL_HASHED
+    base = LOCAL_HF_MODULES / "0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187"
     if not base.exists():
         return
-
-    tfm_base = LOCAL_TFMM_ROOT / "OpenGVLab" / "InternVL2-1B"
-    tfm_base.mkdir(parents=True, exist_ok=True)
-    for fname in [
-        "__init__.py",
-        "modeling_internvl_chat.py",
-        "configuration_intern_vit.py",
-        "configuration_internvl_chat.py",
-        "modeling_intern_vit.py",
-        "conversation.py",
-    ]:
-        src = base / fname
-        dst = tfm_base / fname
-        if src.exists() and not dst.exists():
-            shutil.copy2(src, dst)
 
     # Ensure package hierarchy exists for relative imports
     def _ensure_pkg(name: str, path: Path):
@@ -71,19 +56,17 @@ def _register_local_internvl_modules():
         pkg.__path__ = [str(path)]
         sys.modules[name] = pkg
 
-    _ensure_pkg("transformers_modules", LOCAL_TFMM_ROOT)
-    _ensure_pkg("transformers_modules.OpenGVLab", LOCAL_TFMM_ROOT / "OpenGVLab")
-    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", tfm_base)
+    _ensure_pkg("transformers_modules", base.parent)
+    _ensure_pkg("transformers_modules.OpenGVLab", base.parent / "OpenGVLab")
+    _ensure_pkg("transformers_modules.OpenGVLab.InternVL2-1B", base)
 
-    module_map = [
-        ("transformers_modules.OpenGVLab.InternVL2-1B.__init__", tfm_base / "__init__.py"),
-        ("transformers_modules.OpenGVLab.InternVL2-1B.configuration_intern_vit", tfm_base / "configuration_intern_vit.py"),
-        ("transformers_modules.OpenGVLab.InternVL2-1B.configuration_internvl_chat", tfm_base / "configuration_internvl_chat.py"),
-        ("transformers_modules.OpenGVLab.InternVL2-1B.modeling_intern_vit", tfm_base / "modeling_intern_vit.py"),
-        ("transformers_modules.OpenGVLab.InternVL2-1B.conversation", tfm_base / "conversation.py"),
-        ("transformers_modules.OpenGVLab.InternVL2-1B.modeling_internvl_chat", tfm_base / "modeling_internvl_chat.py"),
-    ]
-    for mod_name, path in module_map:
+    module_map = {
+        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_internvl_chat": base / "modeling_internvl_chat.py",
+        "transformers_modules.OpenGVLab.InternVL2-1B.configuration_intern_vit": base / "configuration_intern_vit.py",
+        "transformers_modules.OpenGVLab.InternVL2-1B.modeling_intern_vit": base / "modeling_intern_vit.py",
+        "transformers_modules.OpenGVLab.InternVL2-1B.conversation": base / "conversation.py",
+    }
+    for mod_name, path in module_map.items():
         if not path.exists():
             continue
         spec = importlib.util.spec_from_file_location(
@@ -627,7 +610,7 @@ class SimLingoInferenceBaseline:
         )
         self.model = self._build_model()
         # 최종 forward의 어텐션/grad만 유지 (레이어/헤드별)
-        self.recorder = AttentionRecorder(keep_last_only=True)
+        self.recorder = AttentionRecorder(keep_last_only=False)
         self._register_attention_hooks()
         self._speed_cache: Dict[str, Dict[str, float]] = {}
 
@@ -881,7 +864,24 @@ class SimLingoInferenceBaseline:
             if not self.skip_backward:
                 if target_scalar is None:
                     raise RuntimeError("Target scalar could not be computed for relevance backprop.")
-                target_scalar.backward(retain_graph=False)
+                # Pass 1 Backward (Optional, usually broken for autoregressive)
+                # target_scalar.backward(retain_graph=False)
+
+            # Pass 2: Teacher Forcing Re-run for Gradients
+            # We use the generated text (or action) to construct a full sequence input
+            # and run a single forward pass to get connected gradients.
+            generated_text = text_features.get("decoded_text", "") if text_features else ""
+            
+            # Start recording for the gradient pass
+            self.recorder.start_recording(record_tag)
+            
+            tf_target_scalar, tf_meta = self._run_teacher_forcing_pass(
+                image_path, current_speed, generated_text, outputs
+            )
+            
+            if not self.skip_backward and tf_target_scalar is not None:
+                tf_target_scalar.backward()
+            
             attention_maps = self.recorder.stop_recording()
             # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
             attn_seq = getattr(outputs, "attentions", None)
@@ -896,12 +896,17 @@ class SimLingoInferenceBaseline:
                     attention_maps[f"language_attn_layer_{idx}"] = [attn_entries[-1]]
             if not self.skip_backward:
                 self.model.zero_grad(set_to_none=True)
+            
+            # Update target_info with TF meta if available (it might have better details)
+            if tf_meta:
+                target_meta.update(tf_meta)
+
             payload = {
                 "tag": record_tag,
                 "image_path": str(image_path),
                 "input_speed_mps": current_speed,
                 "meta": meta,
-                "target_scalar": target_scalar.detach().to("cpu") if target_scalar is not None else None,
+                "target_scalar": tf_target_scalar.detach().to("cpu") if tf_target_scalar is not None else None,
                 "target_info": target_meta,
                 "outputs": self._serialize_outputs(outputs),
                 "text_outputs": self._serialize_text_outputs(text_features),
@@ -937,8 +942,35 @@ class SimLingoInferenceBaseline:
             # 입력 원본 이미지도 정리용으로 복사
             shutil.copy2(image_path, scenario_subdirs["input_images"] / image_path.name)
 
+    def _run_teacher_forcing_pass(
+        self,
+        image_path: Path,
+        current_speed: float,
+        generated_text: str,
+        original_outputs,
+    ) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
+        """
+        Teacher forcing 모드로 모델을 다시 실행하여 그래디언트를 계산합니다.
+        생성된 텍스트 또는 원래 예측된 행동을 사용하여 입력 시퀀스를 구성합니다.
+        """
+        # 텍스트 모드인 경우, 생성된 텍스트를 assistant_response로 사용하여 입력 구성
+        if self.explain_mode == "text":
+            driving_input, _ = self._prepare_driving_input(
+                image_path, current_speed=current_speed, append_response=generated_text
+            )
+            tf_outputs = self.model(driving_input)
+            tf_text_features = self._gather_text_features()
+            tf_target_scalar, tf_meta = self._compute_target_scalar(tf_outputs, tf_text_features)
+            return tf_target_scalar, tf_meta
+        
+        # 행동 모드인 경우, 원래 예측된 행동을 사용하여 입력 구성 (현재는 지원하지 않음)
+        # TODO: 행동 모드에 대한 teacher forcing 구현 (예: pred_route를 target_point로 사용)
+        # 현재는 행동 모드에서 teacher forcing을 사용하지 않고 원래 출력을 반환
+        tf_target_scalar, tf_meta = self._compute_target_scalar(original_outputs, None)
+        return tf_target_scalar, tf_meta
+
     def _prepare_driving_input(
-        self, image_path: Path, current_speed: float = 0.0
+        self, image_path: Path, current_speed: float = 0.0, append_response: str = ""
     ) -> Tuple[DrivingInput, Dict[str, Any]]:
         """단일 이미지를 전처리하여 DrivingInput과 메타 정보를 생성합니다."""
         processed_image, num_patches, orig_hw = self._preprocess_image(image_path)
@@ -946,7 +978,9 @@ class SimLingoInferenceBaseline:
         prompt_str = (
             f"Current speed: {current_speed:.1f} m/s. What should the ego vehicle do next? Provide a short commentary."
         )
-        lang_label = self._build_language_label(prompt_str, placeholder_batch_list, num_patches)
+        lang_label = self._build_language_label(
+            prompt_str, placeholder_batch_list, num_patches, assistant_response=append_response
+        )
         camera_intrinsics = get_camera_intrinsics(orig_hw[1], orig_hw[0], 110).unsqueeze(0).unsqueeze(0)
         camera_extrinsics = get_camera_extrinsics().unsqueeze(0).unsqueeze(0)
         driving_input = DrivingInput(
@@ -1164,6 +1198,116 @@ class SimLingoInferenceBaseline:
         processed_image = pixel_values.view(1, self.T, num_patches, C, H, W)
         return processed_image, num_patches, (image.height, image.width)
 
+    def _run_teacher_forcing_pass(
+        self, image_path: Path, current_speed: float, generated_text: str, original_outputs
+    ) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
+        """Generated text를 포함한 입력을 구성해 Teacher Forcing으로 그래디언트를 계산합니다."""
+        # 1. Re-build input with full text
+        tf_input, _ = self._prepare_driving_input(
+            image_path, current_speed, append_response=generated_text
+        )
+        
+        # 2. Get adaptors (inference=True to prepare embeddings, but we use them for TF)
+        adaptor_dict = self.model.adaptors(tf_input, inference=True)
+        
+        # 3. Manual Forward Pass (bypassing generation)
+        # forward_model returns (adaptor_features, adaptor_logits)
+        features, logits = self.model.forward_model(tf_input, adaptor_dict)
+        
+        # 4. Compute Target Scalar
+        meta = {"pass": "teacher_forcing"}
+        
+        if self.explain_mode == "action":
+            # Decode action from features
+            # SimLingo logic: driving features are at the end
+            # We need to know the length of driving tokens? 
+            # Actually, `self.adaptors.driving` handles the splitting if we pass the full features?
+            # No, `DrivingModel.forward` splits explicitly:
+            # len_driving = inputs_driving["inputs"].size(1)
+            # driving_features = features[:, -len_driving:]
+            
+            # We need `inputs_driving` to know the length.
+            inputs_driving = self.model.adaptors.driving(tf_input)
+            len_driving = inputs_driving["inputs"].size(1)
+            
+            driving_features = features[:, -len_driving:]
+            driving_logits = logits[:, -len_driving:]
+            
+            predictions = self.model.adaptors.driving.get_predictions(driving_features, driving_logits)
+            
+            # Reconstruct outputs tuple for _compute_action_target
+            # (pred_speed_wps, pred_route, language)
+            # We only care about action here.
+            pred_speed_wps = predictions.get("waypoints")
+            pred_route = predictions.get("route")
+            
+            # Use the newly computed action predictions for target calculation
+            tf_outputs = (pred_speed_wps, pred_route, None)
+            return self._compute_action_target(tf_outputs)
+            
+        elif self.explain_mode == "text":
+            # Use logits directly
+            # We need to select the target token.
+            # Strategy: "max" (max logit in the generated part) or "last" (last token logit)
+            
+            # We need to identify which logits correspond to the *generated* part.
+            # The input sequence is [Prompt + Generated].
+            # We need to know the length of the Prompt.
+            
+            # Re-calculate prompt length without response
+            # This is expensive but safe.
+            prompt_only_input, _ = self._prepare_driving_input(image_path, current_speed, append_response="")
+            prompt_len = prompt_only_input.prompt.phrase_ids.shape[1]
+            
+            # Generated part logits
+            gen_logits = logits[:, prompt_len:, :] # [B, GenLen, Vocab]
+            
+            if gen_logits.shape[1] == 0:
+                # Fallback if no text generated
+                return None, {"error": "no_text_generated"}
+                
+            # Construct text_features dict for _compute_text_target
+            # We need token_scores (logits of selected tokens? No, just logits)
+            # _compute_text_target expects "token_scores" to be [GenLen] (scores of chosen tokens) 
+            # OR [GenLen, Vocab]?
+            # Let's check _compute_text_target.
+            # It does: value, index = torch.max(token_scores, dim=0) if strategy="max"
+            # So it expects `token_scores` to be 1D (sequence of scores) or 2D?
+            # `_gather_text_features` returns `token_scores` from `last_sampled_token_scores`.
+            # `last_sampled_token_scores` is usually [B, GenLen] (log probs or logits of *sampled* tokens).
+            
+            # So we need to gather the logits of the *actual* tokens in the sequence.
+            # The actual tokens are in `tf_input.prompt.phrase_ids[:, prompt_len:]`.
+            
+            full_ids = tf_input.prompt.phrase_ids
+            gen_ids = full_ids[:, prompt_len:] # [B, GenLen]
+            
+            # Gather logits for these ids
+            # gen_logits: [B, GenLen, Vocab]
+            # We want [B, GenLen] scores.
+            
+            # torch.gather
+            # gen_logits.gather(2, gen_ids.unsqueeze(-1)).squeeze(-1)
+            
+            token_scores = torch.gather(gen_logits, 2, gen_ids.unsqueeze(-1)).squeeze(-1)
+            if token_scores.dim() > 1:
+                token_scores = token_scores.squeeze(0) # [GenLen]
+            
+            # Also need token_ids, token_strings for meta
+            token_ids = gen_ids.squeeze(0)
+            token_strings = self.tokenizer.convert_ids_to_tokens(token_ids.tolist())
+            
+            text_features = {
+                "token_scores": token_scores,
+                "token_ids": token_ids,
+                "token_strings": token_strings,
+                "decoded_text": generated_text
+            }
+            
+            return self._compute_text_target(text_features)
+            
+        return None, meta
+
     @staticmethod
     def _to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         if tensor is None:
@@ -1184,6 +1328,7 @@ class SimLingoInferenceBaseline:
         prompt: str,
         placeholder_batch_list: List[dict],
         num_patches_all: int,
+        assistant_response: str = "",
     ) -> LanguageLabel:
         conversation = [
             {
@@ -1192,7 +1337,7 @@ class SimLingoInferenceBaseline:
             },
             {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "Waypoints:"}],
+                "content": [{"type": "text", "text": "Waypoints:" + assistant_response}],
             },
         ]
         conv_batch_list = [conversation]
