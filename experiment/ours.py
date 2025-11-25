@@ -587,6 +587,9 @@ class GenericAttentionActionVisualizer:
         mlp1_output_grad = None
         if isinstance(interleaver.get("mlp1_output"), dict):
             mlp1_output_grad = _to_device(interleaver.get("mlp1_output").get("grad"))
+            # Flatten batch dimension if present (e.g. [B, N, C] -> [B*N, C])
+            if mlp1_output_grad is not None and mlp1_output_grad.dim() == 3:
+                mlp1_output_grad = mlp1_output_grad.reshape(-1, mlp1_output_grad.shape[-1])
         mlp1_weight = interleaver.get("mlp1_weight")
         mlp1_bias = interleaver.get("mlp1_bias")
 
