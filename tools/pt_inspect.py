@@ -36,6 +36,11 @@ def parse_args() -> argparse.Namespace:
         default=200,
         help="Max sequence items to show per level (default: 200)",
     )
+    parser.add_argument(
+        "--save-log",
+        action="store_true",
+        help="Save inspection output to tools/pt_inspect.log (appends)",
+    )
     return parser.parse_args()
 
 
@@ -231,16 +236,37 @@ def describe(obj, name: str, indent: int, depth: int, args: argparse.Namespace) 
     print(f"{pad}{name}: {type(obj).__name__}")
 
 
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
 def main() -> int:
     args = parse_args()
     if not os.path.exists(args.path):
         print(f"File not found: {args.path}", file=sys.stderr)
         return 1
 
+    log_fp = None
+    if args.save_log:
+        log_dir = Path(__file__).resolve().parent
+        log_fp = open(log_dir / "pt_inspect.log", "a", encoding="utf-8")
+        sys.stdout = Tee(sys.stdout, log_fp)
+
     try:
         payload = torch.load(args.path, map_location="cpu")
     except Exception as exc:  # pragma: no cover - defensive
         print(f"Failed to load {args.path}: {exc}", file=sys.stderr)
+        if log_fp:
+            log_fp.close()
         return 1
 
     print(f"# {args.path}")
@@ -248,6 +274,9 @@ def main() -> int:
     if _is_simlingo_payload(payload):
         describe_simlingo_payload(payload)
     describe(payload, "<root>", 0, args.depth, args)
+
+    if log_fp:
+        log_fp.close()
     return 0
 
 

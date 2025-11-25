@@ -248,6 +248,10 @@ python experiment/run_integrated_pipeline_interleave.py data/sample_small/01 --b
 - 결과는 `experiment_outputs/integrated/<ScenarioName>_<DateTime>/` 아래에 메소드별로 정리됩니다.
 - 중간에 중단되더라도 처리된 배치의 결과는 저장됩니다.
 
+## 6-4) PT 파일 확인
+```bash
+python tools/pt_inspect.py experiment_outputs/integrated/01_20251125_184525/inference_action/data_sample_small_01_action_curv_energy_251125_1845/pt/0001.pt --save-log
+```
 ## 압축/전송(참고, zip 기준)
 - 압축(현재 경로에 폴더가 있을 때): `zip -r <압축할파일이름>.zip <폴더이름>`  
   예: `zip -r experiment_outputs.zip experiment_outputs` → `./experiment_outputs.zip` 생성
@@ -274,3 +278,7 @@ gdown --fuzzy 'https://drive.google.com/file/d/16WOxAYcr6TONqOBDwvX40uoXVzK18Bmw
 gdown --fuzzy 'https://drive.google.com/file/d/1KgWRInvxE9hTf_hKMo58-fzZOAGIsaP5/view?usp=sharing' -O sample_small.zip
 
 ```
+
+
+
+

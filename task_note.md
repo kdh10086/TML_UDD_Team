@@ -51,3 +51,4 @@
 - [x] Add rollout tuning options: residual_alpha, optional softmax/temperature on cams, and layer depth selection.
 - [ ] Log target scalar/token choice per frame; warn if target selection is empty or unexpected.
 - [ ] Add a simple PT QA script: load one payload, print relevance stats (max/mean/var), and render a quick heatmap for manual QA.
+
