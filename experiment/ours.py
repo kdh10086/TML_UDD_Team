@@ -14,7 +14,7 @@ import sys
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -62,6 +62,8 @@ class GenericAttentionActionVisualizer:
         device: Optional[str] = None,
         colormap: str = "JET",
         alpha: float = 0.5,
+        residual_alpha: float = 0.5,
+        propagation_mode: str = "llm_to_vision",
         trajectory_overlay_root: Optional[Path] = None,
         payload_root: Optional[Path] = None,
     ) -> None:
@@ -80,6 +82,10 @@ class GenericAttentionActionVisualizer:
         if not (0.0 <= alpha <= 1.0):
             raise ValueError("alpha must be between 0 and 1.")
         self.alpha = alpha
+        self.residual_alpha = residual_alpha
+        if propagation_mode not in ("llm_to_vision",):
+            raise ValueError(f"Unsupported propagation_mode: {propagation_mode}")
+        self.propagation_mode = propagation_mode
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(self.cfg.model.vision_model.variant, trust_remote_code=True)
         self.tokenizer = self.processor.tokenizer if hasattr(self.processor, "tokenizer") else self.processor
@@ -263,31 +269,71 @@ class GenericAttentionActionVisualizer:
         raw_output_dir: Optional[Path] = None,
     ) -> Path:
         attention_maps = payload.get("attention") or {}
+        interleaver = payload.get("interleaver") or {}
         target_info = payload.get("target_info", {})
         if not attention_maps or target_info.get("type") != "action":
             raise RuntimeError("Cached payload is missing attention info for action-mode Generic Attention.")
         meta = payload["meta"]
         prompt_token_ids = self._rebuild_prompt_token_ids(meta, payload.get("input_speed_mps", 0.0))
-        moved_attention = self._move_attention_maps_to_device(attention_maps, self.device)
-        relevance = self._compute_language_relevance(moved_attention)
+        try:
+            moved_attention = self._move_attention_maps_to_device(attention_maps, self.device)
+            relevance = self._compute_language_relevance(moved_attention)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to compute language relevance for {image_path.name}: {exc}") from exc
         source_index = len(prompt_token_ids) - 1
         seq_len = relevance.shape[0]
         if source_index >= seq_len:
             raise IndexError(f"Target token index ({source_index}) exceeds recorded attention sequence ({seq_len}).")
         image_token_positions = self._select_image_token_positions(prompt_token_ids, meta["num_total_image_tokens"])
-        token_scores = relevance[source_index, image_token_positions]
-        heatmap = self._scores_to_heatmap(token_scores.clone().detach().to(self.device), meta)
-        
-        if raw_output_dir:
-            heatmap_uint8 = np.uint8(255 * heatmap)
-            raw_path = raw_output_dir / f"{image_path.stem}.png"
-            Image.fromarray(heatmap_uint8).save(raw_path)
+        # language-side relevance -> image tokens
+        token_scores = relevance[source_index, image_token_positions].clone().detach().to(self.device)
 
-        # Save Overlay
-        overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)
-        output_path = output_dir / f"{image_path.stem}.png"
-        Image.fromarray(overlay).save(output_path)
-        return output_path
+        # If interleaver info exists, project back to ViT patch grid
+        grid_hw: Optional[Tuple[int, int]] = None
+        if interleaver:
+            patch_scores_list = self._project_interleaver_relevance(token_scores, interleaver)
+            if not patch_scores_list:
+                print(f"[WARN] Interleaver projection failed for {image_path.name}; falling back to token scores.")
+                patch_scores_list = [(token_scores, grid_hw)]
+        else:
+            patch_scores_list = [(token_scores, grid_hw)]
+
+        if self.propagation_mode != "llm_to_vision":
+            raise RuntimeError(f"Propagation mode '{self.propagation_mode}' is not supported in this visualizer.")
+
+        # If vision attentions exist, propagate through vision stack
+        outputs: List[Path] = []
+        vision_attn = {k: v for k, v in moved_attention.items() if "vision_attn" in k or "vision_block" in k}
+
+        for idx, (patch_scores, grid_hw_val) in enumerate(patch_scores_list):
+            vision_scores = patch_scores
+            if vision_attn and patch_scores is not None:
+                try:
+                    vision_scores = self._compute_vision_relevance(vision_attn, patch_scores)
+                except Exception as exc:
+                    print(f"[WARN] Vision relevance failed for {image_path.name} slice {idx}: {exc}")
+                    vision_scores = patch_scores
+
+            # Determine actual image size for alignment
+            img_arr = cv2.imread(str(image_path))
+            actual_size = (img_arr.shape[1], img_arr.shape[0]) if img_arr is not None else None
+
+            heatmap_source = vision_scores.clone().detach().to(self.device) if vision_scores is not None else token_scores
+            heatmap = self._scores_to_heatmap(heatmap_source, meta, grid_hw=grid_hw_val, target_size=actual_size)
+            
+            if raw_output_dir:
+                heatmap_uint8 = np.uint8(255 * heatmap)
+                raw_name = f"{image_path.stem}.png" if len(patch_scores_list) == 1 else f"{image_path.stem}_img{idx}.png"
+                raw_path = raw_output_dir / raw_name
+                Image.fromarray(heatmap_uint8).save(raw_path)
+
+            overlay_name = image_path.stem if len(patch_scores_list) == 1 else f"{image_path.stem}_img{idx}"
+            overlay = self._render_overlay(image_path, heatmap, overlay_name, route_overlay_dir, speed_overlay_dir)
+            output_path = output_dir / f"{overlay_name}.png"
+            Image.fromarray(overlay).save(output_path)
+            outputs.append(output_path)
+
+        return outputs[0] if outputs else output_dir / f"{image_path.stem}.png"
 
     @staticmethod
     def _prepare_output_subdir(output_root: Path, scene_dir: Path, suffix: str) -> Path:
@@ -327,18 +373,37 @@ class GenericAttentionActionVisualizer:
                     best_h, best_w = h2, w2
         return best_h, best_w
 
-    def _scores_to_heatmap(self, scores: torch.Tensor, meta: Dict[str, Any]) -> np.ndarray:
+    def _scores_to_heatmap(
+        self,
+        scores: torch.Tensor,
+        meta: Dict[str, Any],
+        grid_hw: Optional[Tuple[int, int]] = None,
+        target_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
         # Use actual token count (may be shorter than expected) and pad to a grid
         total_tokens = int(scores.numel())
         orig_h = meta["original_height"]
         orig_w = meta["original_width"]
+        if target_size:
+            tgt_w, tgt_h = target_size
+            if (orig_w, orig_h) != (tgt_w, tgt_h):
+                print(
+                    f"[WARN] meta size ({orig_w}x{orig_h}) != actual image size ({tgt_w}x{tgt_h}); using actual size for final resize."
+                )
+                orig_w, orig_h = tgt_w, tgt_h
 
-        # Approximate grid preserving aspect ratio, allowing padding if not divisible
-        target_ratio = orig_h / max(orig_w, 1)
-        grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
-        grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
-        if grid_h * grid_w < total_tokens:
-            grid_h = int(math.ceil(total_tokens / grid_w))
+        if grid_hw is not None:
+            grid_h, grid_w = grid_hw
+            if grid_h * grid_w != total_tokens:
+                pad = torch.zeros(grid_h * grid_w - total_tokens, device=scores.device, dtype=scores.dtype)
+                scores = torch.cat([scores, pad], dim=0)
+        else:
+            # Approximate grid preserving aspect ratio, allowing padding if not divisible
+            target_ratio = orig_h / max(orig_w, 1)
+            grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
+            grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
+            if grid_h * grid_w < total_tokens:
+                grid_h = int(math.ceil(total_tokens / grid_w))
 
         if grid_h * grid_w != total_tokens:
             pad = torch.zeros(grid_h * grid_w - total_tokens, device=scores.device, dtype=scores.dtype)
@@ -358,6 +423,9 @@ class GenericAttentionActionVisualizer:
         speed_overlay_dir: Optional[Path],
     ) -> np.ndarray:
         image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
+        if heatmap.shape[:2] != image.shape[:2]:
+            # Align heatmap to actual image size if mismatch occurs
+            heatmap = cv2.resize(heatmap, (image.shape[1], image.shape[0]))
         image_float = np.float32(image) / 255
         cam = show_cam_on_image(image_float, heatmap, self.colormap_code, self.alpha)
         cam = np.uint8(255 * cam)
@@ -423,6 +491,161 @@ class GenericAttentionActionVisualizer:
         if relevance is None:
             raise RuntimeError("Unable to build relevance due to empty attention/gradient pairs.")
         return relevance
+
+    def _compute_vision_relevance(
+        self,
+        attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]],
+        init_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        """Propagate patch-level relevance through vision attention stack (with residual_alpha)."""
+        import re
+        vision_items = []
+        for name, entries in attention_maps.items():
+            if "vision_attn" in name or "vision_block" in name:
+                match = re.search(r"vision_(?:attn|block)_?(\d+)", name)
+                layer_idx = int(match.group(1)) if match else 0
+                vision_items.append((layer_idx, name, entries))
+        if not vision_items:
+            return init_scores
+        # Sort from last to first (top-down relevance)
+        vision_items.sort(key=lambda x: x[0], reverse=True)
+        relevance_vec = init_scores
+        for _, _, entries in vision_items:
+            attn_list = [e["attn"] for e in entries if e.get("attn") is not None]
+            grad_list = [e["grad"] for e in entries if e.get("grad") is not None]
+            if not attn_list or not grad_list:
+                continue
+            min_len = min(t.shape[-1] for t in attn_list)
+            attn_list = [t[..., :min_len, :min_len] for t in attn_list]
+            grad_list = [g[..., :min_len, :min_len] for g in grad_list]
+            attn = torch.stack(attn_list, dim=0).mean(dim=0)
+            grad = torch.stack(grad_list, dim=0).mean(dim=0)
+            cam = avg_heads(attn, grad)  # [S, S]
+            if relevance_vec.shape[-1] != cam.shape[-1]:
+                # Trim/pad relevance vector
+                target_len = cam.shape[-1]
+                if relevance_vec.shape[-1] > target_len:
+                    relevance_vec = relevance_vec[..., :target_len]
+                else:
+                    pad = torch.zeros(target_len - relevance_vec.shape[-1], device=relevance_vec.device, dtype=relevance_vec.dtype)
+                    relevance_vec = torch.cat([relevance_vec, pad], dim=-1)
+            relevance_vec = self.residual_alpha * relevance_vec + torch.matmul(cam, relevance_vec)
+        return relevance_vec
+
+    def _project_interleaver_relevance(
+        self,
+        token_scores: torch.Tensor,
+        interleaver: Dict[str, Any],
+    ) -> List[Tuple[torch.Tensor, Optional[Tuple[int, int]]]]:
+        """Project image-token relevance back to ViT patch grid using interleaver metadata and grads."""
+        # Move tensors to device
+        def _to_device(entry):
+            if entry is None:
+                return None
+            if isinstance(entry, dict) and "value" in entry:
+                return entry["value"].to(self.device)
+            if torch.is_tensor(entry):
+                return entry.to(self.device)
+            return entry
+
+        pixel_shuffle_out = _to_device(interleaver.get("pixel_shuffle_out"))
+        pixel_shuffle_grad = None
+        if isinstance(interleaver.get("pixel_shuffle_out"), dict):
+            pixel_shuffle_grad = _to_device(interleaver.get("pixel_shuffle_out").get("grad"))
+        tokens_per_patch = interleaver.get("tokens_per_patch")
+        num_patches_list = interleaver.get("num_patches_list")
+        selected_mask = _to_device(interleaver.get("selected_mask"))
+        mlp1_output_grad = None
+        if isinstance(interleaver.get("mlp1_output"), dict):
+            mlp1_output_grad = _to_device(interleaver.get("mlp1_output").get("grad"))
+        mlp1_weight = interleaver.get("mlp1_weight")
+        mlp1_bias = interleaver.get("mlp1_bias")
+
+        # If multiple images are present, split by selected_mask counts or num_patches_list.
+        image_offsets: List[int] = []
+        if selected_mask is not None and selected_mask.dim() == 2:
+            # selected_mask: [B, N]; count image tokens per image
+            image_token_counts = selected_mask.sum(dim=1).tolist()
+            prefix = 0
+            for cnt in image_token_counts:
+                image_offsets.append(prefix)
+                prefix += int(cnt)
+        elif num_patches_list:
+            # tokens_per_patch is needed to map patches->tokens
+            if tokens_per_patch and tokens_per_patch > 0:
+                prefix = 0
+                for p in num_patches_list:
+                    image_offsets.append(prefix)
+                    prefix += int(p) * int(tokens_per_patch)
+        else:
+            image_offsets = [0]
+
+        results: List[Tuple[torch.Tensor, Optional[Tuple[int, int]]]] = []
+        num_images = len(image_offsets)
+        for idx in range(num_images):
+            start = image_offsets[idx]
+            end = image_offsets[idx + 1] if idx + 1 < num_images else token_scores.numel()
+            scores = token_scores[start:end]
+
+            # If mlp1_output_grad and weight are available, backprop relevance to input space (Chefer-style)
+            if mlp1_output_grad is not None and mlp1_weight is not None and mlp1_output_grad.shape[0] >= end:
+                grad_slice = mlp1_output_grad[start:end]  # [T, D_out]
+                # grad_slice @ W -> [T, D_in]; use norm as scalar weight per token
+                try:
+                    grad_w = torch.matmul(grad_slice, mlp1_weight.to(self.device))
+                    token_weights = grad_w.norm(dim=-1)
+                    token_weights = token_weights / (token_weights.max() + 1e-6)
+                    if token_weights.numel() == scores.numel():
+                        scores = scores * token_weights
+                except Exception as exc:
+                    print(f"[WARN] mlp1 grad-based weighting failed: {exc}")
+            elif mlp1_output_grad is not None:
+                # Fallback: grad norm only
+                grad_slice = mlp1_output_grad[start:end]
+                grad_norm = grad_slice.norm(dim=-1)
+                if grad_norm.numel() == scores.numel():
+                    grad_norm = grad_norm / (grad_norm.max() + 1e-6)
+                    scores = scores * grad_norm
+
+            # Map tokens -> patches by averaging tokens_per_patch
+            if tokens_per_patch and tokens_per_patch > 0:
+                total_tokens = scores.numel()
+                num_patches = total_tokens // tokens_per_patch
+                if num_patches == 0:
+                    results.append((scores, None))
+                    continue
+                scores = scores[: num_patches * tokens_per_patch]
+                scores = scores.reshape(num_patches, tokens_per_patch).mean(dim=1)
+
+            grid_hw = None
+            if pixel_shuffle_out is not None:
+                # pixel_shuffle_out shape: [B, H, W, C]; pick corresponding image if available
+                img_idx = min(idx, pixel_shuffle_out.shape[0] - 1)
+                h, w = pixel_shuffle_out.shape[1], pixel_shuffle_out.shape[2]
+                grid_hw = (h, w)
+                expected_patches = h * w
+                if scores.numel() != expected_patches:
+                    print(
+                        f"[WARN] Image {idx}: patch relevance length ({scores.numel()}) != expected grid size ({expected_patches}); padding/trimming."
+                    )
+                    if scores.numel() < expected_patches:
+                        pad = torch.zeros(expected_patches - scores.numel(), device=scores.device, dtype=scores.dtype)
+                        scores = torch.cat([scores, pad], dim=0)
+                    else:
+                        scores = scores[:expected_patches]
+                # If pixel_shuffle grad exists, weight patch relevance
+                if pixel_shuffle_grad is not None:
+                    grad_img = pixel_shuffle_grad[img_idx]
+                    grad_norm = grad_img.norm(dim=-1).flatten()
+                    if grad_norm.numel() == scores.numel():
+                        grad_norm = grad_norm / (grad_norm.max() + 1e-6)
+                        scores = scores * grad_norm
+                    else:
+                        print(f"[WARN] pixel_shuffle grad size mismatch for image {idx}: {grad_norm.numel()} vs {scores.numel()}")
+
+            results.append((scores, grid_hw))
+
+        return results
 
     def _select_image_token_positions(self, prompt_token_ids: List[int], expected: int) -> List[int]:
         positions = [idx for idx, token_id in enumerate(prompt_token_ids) if token_id == self.img_context_token_id]
