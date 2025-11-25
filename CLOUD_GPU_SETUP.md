@@ -241,6 +241,9 @@ Inference(Action/Text)와 5가지 Visualization을 한 번에 실행하며, 100�
 ```bash
 # 통합 파이프라인 실행 (배치 크기 100)
 python experiment/run_integrated_pipeline.py data/sample_small/01 --batch_size 100
+
+python experiment/run_integrated_pipeline_interleave.py data/sample_small/01 --batch_size 100
+
 ```
 - 결과는 `experiment_outputs/integrated/<ScenarioName>_<DateTime>/` 아래에 메소드별로 정리됩니다.
 - 중간에 중단되더라도 처리된 배치의 결과는 저장됩니다.

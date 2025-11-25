@@ -226,8 +226,8 @@ def _install_interleaver_logging(driving_model) -> None:
 
     def _patch_forward(
         self,
-        pixel_values: torch.FloatTensor,
-        input_ids: torch.LongTensor = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         image_flags: Optional[torch.LongTensor] = None,
@@ -237,55 +237,72 @@ def _install_interleaver_logging(driving_model) -> None:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        image_flags = image_flags.squeeze(-1)
-        input_embeds = self.language_model.get_input_embeddings()(input_ids).clone()
-
-        vit_embeds = self.extract_feature(pixel_values)
-        vit_embeds = vit_embeds[image_flags == 1]
-        vit_batch_size = pixel_values.shape[0]
-
-        B, N, C = input_embeds.shape
-        input_embeds = input_embeds.reshape(B * N, C)
-
-        input_ids = input_ids.reshape(B * N)
-        selected = input_ids == self.img_context_token_id
-        try:
-            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
-        except Exception as e:
-            vit_embeds = vit_embeds.reshape(-1, C)
-            print(
-                f"warning: {e}, input_embeds[selected].shape={input_embeds[selected].shape}, "
-                f"vit_embeds.shape={vit_embeds.shape}"
+        # If inputs_embeds are provided (e.g., downstream calls), bypass interleaver logging
+        if inputs_embeds is not None or pixel_values is None:
+            outputs = self.language_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=True,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                **kwargs,
             )
-            n_token = selected.sum()
-            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
+        else:
+            image_flags = image_flags.squeeze(-1) if image_flags is not None else None
+            input_embeds = self.language_model.get_input_embeddings()(input_ids).clone()
 
-        input_embeds = input_embeds.reshape(B, N, C)
+            vit_embeds = self.extract_feature(pixel_values)
+            vit_embeds = vit_embeds[image_flags == 1] if image_flags is not None else vit_embeds
+            vit_batch_size = pixel_values.shape[0]
 
-        cache = getattr(self, "_interleaver_cache", {}) or {}
-        cache.update(
-            {
-                "selected_mask": selected.reshape(B, N),
-                "vit_embeds": vit_embeds,
-                "vit_batch_size": vit_batch_size,
-                "input_shape": (B, N, C),
-            }
-        )
-        self._interleaver_cache = cache
+            B, N, C = input_embeds.shape
+            input_embeds = input_embeds.reshape(B * N, C)
 
-        outputs = self.language_model(
-            inputs_embeds=input_embeds,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=True,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+            input_ids = input_ids.reshape(B * N)
+            selected = input_ids == self.img_context_token_id
+            try:
+                input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
+            except Exception as e:
+                vit_embeds = vit_embeds.reshape(-1, C)
+                print(
+                    f"warning: {e}, input_embeds[selected].shape={input_embeds[selected].shape}, "
+                    f"vit_embeds.shape={vit_embeds.shape}"
+                )
+                n_token = selected.sum()
+                input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
+
+            input_embeds = input_embeds.reshape(B, N, C)
+
+            cache = getattr(self, "_interleaver_cache", {}) or {}
+            cache.update(
+                {
+                    "selected_mask": selected.reshape(B, N),
+                    "vit_embeds": vit_embeds,
+                    "vit_batch_size": vit_batch_size,
+                    "input_shape": (B, N, C),
+                }
+            )
+            self._interleaver_cache = cache
+
+            outputs = self.language_model(
+                inputs_embeds=input_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=True,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                **kwargs,
+            )
         # Use the attentions returned by the model directly
         if outputs.attentions is not None:
             # Stash for external retrieval (e.g. by SimLingoInferenceBaseline)
