@@ -163,9 +163,19 @@ def _install_extract_feature_patch(auto_model) -> None:
 
 def _install_interleaver_logging(driving_model) -> None:
     """Patch InternVLChatModel forward/extract_feature to stash interleaver tensors."""
-    lm = getattr(driving_model, "language_model", None)
+    # Target the VLM used for vision encoding (InternVLChatModel)
+    # It is located at driving_model.vision_model.image_encoder.model
+    lm = None
+    if hasattr(driving_model, "vision_model") and hasattr(driving_model.vision_model, "image_encoder"):
+        lm = getattr(driving_model.vision_model.image_encoder, "model", None)
+    
+    if lm is None:
+        # Fallback to language model if vision path fails (though unlikely for SimLingo)
+        lm = getattr(driving_model, "language_model", None)
+
     if lm is None:
         return
+        
     core = lm
     if getattr(core, "_interleaver_logging_installed", False):
         return
@@ -1173,10 +1183,15 @@ class SimLingoInferenceBaseline:
 
         # 추가: interleaver 구간 로깅 (mask, mlp1 입출력 등)
         interleaver_info = None
-        lm_core = getattr(self.model.language_model, "model", None)
-        # Fix: retrieve from the VLM wrapper where we installed the hook
-        if hasattr(self.model.language_model, "_interleaver_cache"):
-             lm_core = self.model.language_model
+        # Retrieve from the VLM wrapper where we installed the hook
+        # driving_model.vision_model.image_encoder.model
+        lm_core = None
+        if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "image_encoder"):
+             lm_core = getattr(self.model.vision_model.image_encoder, "model", None)
+        
+        if lm_core is None:
+             # Fallback
+             lm_core = getattr(self.model.language_model, "model", None)
         if lm_core is not None:
             cache = getattr(lm_core, "_interleaver_cache", None)
             interleaver_info = self._serialize_interleaver_cache(cache)
