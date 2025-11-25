@@ -212,8 +212,10 @@ def _install_interleaver_logging(driving_model) -> None:
                     pass
 
         # Derive patch count per image (assumes uniform num_image_token per patch)
+        # Derive patch count per image (assumes uniform num_image_token per patch)
         num_tokens = mlp_input.shape[1]
-        tokens_per_patch = int(self.num_image_token) if hasattr(self, "num_image_token") else None
+        # Use actual output shape as tokens_per_patch
+        tokens_per_patch = num_tokens
         num_patches_total = None
         if tokens_per_patch and tokens_per_patch > 0:
             num_patches_total = int(num_tokens // tokens_per_patch)

@@ -247,7 +247,11 @@ class Tee:
 
     def flush(self):
         for s in self.streams:
-            s.flush()
+            if not s.closed:
+                try:
+                    s.flush()
+                except ValueError:
+                    pass
 
 
 def main() -> int:
