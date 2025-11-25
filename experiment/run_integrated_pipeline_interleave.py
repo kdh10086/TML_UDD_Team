@@ -292,17 +292,17 @@ def process_scenario(scenario_path: Path, batch_size: int, device: str, base_out
         # Log PT summary for action pass
         summarize_pt_dir(actual_action_dir / "pt", log_file, label="action")
             
-            # Update pt_source for action visualizers
-            # The PT files are in actual_action_dir / "pt"
-            pt_action_source = actual_action_dir / "pt"
-            for viz in action_visualizers:
-                viz["pt_source"] = pt_action_source
-            for viz in vit_visualizers:
-                viz["pt_source"] = pt_action_source
+        # Update pt_source for action visualizers
+        # The PT files are in actual_action_dir / "pt"
+        pt_action_source = actual_action_dir / "pt"
+        for viz in action_visualizers:
+            viz["pt_source"] = pt_action_source
+        for viz in vit_visualizers:
+            viz["pt_source"] = pt_action_source
 
-            # --- Visualizations (Action) ---
-            print(f"[Pipeline] Running Visualizations (Action-dependent)... PT Source: {pt_action_source}")
-            run_visualizers_for_batch(action_visualizers + vit_visualizers, batch_files)
+        # --- Visualizations (Action) ---
+        print(f"[Pipeline] Running Visualizations (Action-dependent)... PT Source: {pt_action_source}")
+        run_visualizers_for_batch(action_visualizers + vit_visualizers, batch_files)
             
         # --- Inference Text ---
         print("[Pipeline] Running Inference (Text)...")
@@ -310,24 +310,24 @@ def process_scenario(scenario_path: Path, batch_size: int, device: str, base_out
         actual_text_dir = inference_runner.run_batch(batch_files, inference_text_dir, scenario_path)
         summarize_pt_dir(actual_text_dir / "pt", log_file, label="text")
             
-            # Update pt_source for text visualizers
-            pt_text_source = actual_text_dir / "pt"
-            for viz in text_visualizers:
-                viz["pt_source"] = pt_text_source
-                
-            # --- Visualizations (Text) ---
-            print(f"[Pipeline] Running Visualizations (Text-dependent)... PT Source: {pt_text_source}")
-            run_visualizers_for_batch(text_visualizers, batch_files)
+        # Update pt_source for text visualizers
+        pt_text_source = actual_text_dir / "pt"
+        for viz in text_visualizers:
+            viz["pt_source"] = pt_text_source
             
-            # --- Cleanup PT Files ---
-            # After all visualizations are done for this batch, delete PT files to save space
-            print(f"[Pipeline] Cleaning up PT files for batch {batch_idx + 1}...")
-            if pt_action_source.exists():
-                shutil.rmtree(pt_action_source)
-                print(f"[Pipeline]   Deleted: {pt_action_source}")
-            if pt_text_source.exists():
-                shutil.rmtree(pt_text_source)
-                print(f"[Pipeline]   Deleted: {pt_text_source}")
+        # --- Visualizations (Text) ---
+        print(f"[Pipeline] Running Visualizations (Text-dependent)... PT Source: {pt_text_source}")
+        run_visualizers_for_batch(text_visualizers, batch_files)
+        
+        # --- Cleanup PT Files ---
+        # After all visualizations are done for this batch, delete PT files to save space
+        print(f"[Pipeline] Cleaning up PT files for batch {batch_idx + 1}...")
+        if pt_action_source.exists():
+            shutil.rmtree(pt_action_source)
+            print(f"[Pipeline]   Deleted: {pt_action_source}")
+        if pt_text_source.exists():
+            shutil.rmtree(pt_text_source)
+            print(f"[Pipeline]   Deleted: {pt_text_source}")
 
         print(f"\n[Pipeline] Done! Results saved to {base_output_dir}")
         print(f"[Pipeline] Intermediate inference outputs kept in {inference_action_dir} and {inference_text_dir}")
