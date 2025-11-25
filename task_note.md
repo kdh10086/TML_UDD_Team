@@ -44,3 +44,10 @@
 - [ ] Document usage: how to enable logging, `propagation_mode` limitation (`llm_to_vision`), multi-image output naming (`_img{idx}`), heuristic nature of grad weighting.
 - [ ] Run smoke tests (single/multi-image batches) and review `pipeline.log` to ensure no crashes and inspect warnings.
 - [x] Add logging hooks so that, after integrated pipeline runs, a summarized verification log (checks on interleaver fields, attention presence) is saved alongside `pipeline.log` for easier remote review.
+
+## Heatmap quality fixes (new)
+- [x] Normalize/clamp relevance before heatmap (e.g., min-max or percentile clip) to avoid washed-out overlays; add toggle in visualizers.
+- [x] Validate tokens_per_patch/grid mapping in interleaver; on mismatch, skip/adjust with clear warnings.
+- [x] Add rollout tuning options: residual_alpha, optional softmax/temperature on cams, and layer depth selection.
+- [ ] Log target scalar/token choice per frame; warn if target selection is empty or unexpected.
+- [ ] Add a simple PT QA script: load one payload, print relevance stats (max/mean/var), and render a quick heatmap for manual QA.

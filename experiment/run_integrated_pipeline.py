@@ -239,14 +239,14 @@ def process_scenario(scenario_path: Path, batch_size: int, device: str, base_out
         run_visualizers_for_batch(text_visualizers, batch_files)
         
         # --- Cleanup PT Files ---
-        # After all visualizations are done for this batch, delete PT files to save space
-        print(f"[Pipeline] Cleaning up PT files for batch {batch_idx + 1}...")
-        if pt_action_source.exists():
-            shutil.rmtree(pt_action_source)
-            print(f"[Pipeline]   Deleted: {pt_action_source}")
-        if pt_text_source.exists():
-            shutil.rmtree(pt_text_source)
-            print(f"[Pipeline]   Deleted: {pt_text_source}")
+        if args.delete_pt:
+            print(f"[Pipeline] Cleaning up PT files for batch {batch_idx + 1}...")
+            if pt_action_source.exists():
+                shutil.rmtree(pt_action_source)
+                print(f"[Pipeline]   Deleted: {pt_action_source}")
+            if pt_text_source.exists():
+                shutil.rmtree(pt_text_source)
+                print(f"[Pipeline]   Deleted: {pt_text_source}")
 
     print(f"\n[Pipeline] Done! Results saved to {base_output_dir}")
     print(f"[Pipeline] Intermediate inference outputs kept in {inference_action_dir} and {inference_text_dir}")
@@ -257,6 +257,7 @@ def main():
     parser.add_argument("input_path", type=Path, help="Path to scenario directory or dataset directory")
     parser.add_argument("--batch_size", type=int, default=100, help="Number of frames per batch")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
+    parser.add_argument("--delete_pt", action="store_true", help="Delete intermediate PT payloads after visualizations")
     args = parser.parse_args()
 
     input_path = args.input_path.resolve()

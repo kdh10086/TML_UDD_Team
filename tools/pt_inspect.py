@@ -145,6 +145,39 @@ def describe_simlingo_payload(payload) -> None:
         if ids is not None:
             print(f"  · token_ids 길이: {_maybe_len(ids)}")
 
+    inter = payload.get("interleaver")
+    if inter:
+        print("- 인터리버 요약")
+        tokens_per_patch = inter.get("tokens_per_patch")
+        num_patches_list = inter.get("num_patches_list")
+        selected_mask = inter.get("selected_mask")
+        if tokens_per_patch is not None:
+            print(f"  · tokens_per_patch: {tokens_per_patch}")
+        if num_patches_list is not None:
+            print(f"  · num_patches_list: {num_patches_list}")
+        if isinstance(selected_mask, torch.Tensor):
+            print(f"  · selected_mask: shape={tuple(selected_mask.shape)} sum={float(selected_mask.sum().item())}")
+
+        def _shape_grad(entry, name: str):
+            if entry is None:
+                return f"{name}: 없음"
+            tensor = entry.get("value") if isinstance(entry, dict) else entry
+            grad = entry.get("grad") if isinstance(entry, dict) else None
+            shape = tuple(tensor.shape) if isinstance(tensor, torch.Tensor) else type(tensor).__name__
+            grad_info = (
+                f"grad shape={tuple(grad.shape)}" if isinstance(grad, torch.Tensor) else "grad 없음"
+            )
+            return f"{name}: {shape}, {grad_info}"
+
+        for key in ["pixel_shuffle_out", "mlp1_input", "mlp1_output", "vit_embeds"]:
+            print(f"  · {_shape_grad(inter.get(key), key)}")
+        if inter.get("mlp1_weight") is not None:
+            w = inter.get("mlp1_weight")
+            print(f"  · mlp1_weight: {tuple(w.shape)}")
+        if inter.get("mlp1_bias") is not None:
+            b = inter.get("mlp1_bias")
+            print(f"  · mlp1_bias: {tuple(b.shape)}")
+
     attention = payload.get("attention") or {}
     if attention:
         print("- 어텐션 맵 상세")

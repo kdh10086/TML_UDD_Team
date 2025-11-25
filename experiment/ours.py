@@ -64,6 +64,10 @@ class GenericAttentionActionVisualizer:
         alpha: float = 0.5,
         residual_alpha: float = 0.5,
         propagation_mode: str = "llm_to_vision",
+        normalize_mode: str = "minmax",
+        clip_percentile: Optional[float] = None,
+        cam_softmax: bool = False,
+        cam_temperature: float = 1.0,
         trajectory_overlay_root: Optional[Path] = None,
         payload_root: Optional[Path] = None,
     ) -> None:
@@ -86,6 +90,10 @@ class GenericAttentionActionVisualizer:
         if propagation_mode not in ("llm_to_vision",):
             raise ValueError(f"Unsupported propagation_mode: {propagation_mode}")
         self.propagation_mode = propagation_mode
+        self.normalize_mode = normalize_mode
+        self.clip_percentile = clip_percentile
+        self.cam_softmax = cam_softmax
+        self.cam_temperature = cam_temperature
         self.cfg = OmegaConf.load(self.config_path)
         self.processor = AutoProcessor.from_pretrained(self.cfg.model.vision_model.variant, trust_remote_code=True)
         self.tokenizer = self.processor.tokenizer if hasattr(self.processor, "tokenizer") else self.processor
@@ -319,6 +327,8 @@ class GenericAttentionActionVisualizer:
             actual_size = (img_arr.shape[1], img_arr.shape[0]) if img_arr is not None else None
 
             heatmap_source = vision_scores.clone().detach().to(self.device) if vision_scores is not None else token_scores
+            # Log relevance stats for QA
+            self._log_relevance_stats(heatmap_source, f"{image_path.name}-img{idx}")
             heatmap = self._scores_to_heatmap(heatmap_source, meta, grid_hw=grid_hw_val, target_size=actual_size)
             
             if raw_output_dir:
@@ -410,7 +420,14 @@ class GenericAttentionActionVisualizer:
             scores = torch.cat([scores, pad], dim=0)
 
         heatmap = scores.reshape(grid_h, grid_w).detach().float().to("cpu").numpy()
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+        # Normalization/clipping for better contrast
+        if self.clip_percentile:
+            lo = np.percentile(heatmap, self.clip_percentile)
+            hi = np.percentile(heatmap, 100 - self.clip_percentile)
+            heatmap = np.clip((heatmap - lo) / (hi - lo + 1e-6), 0, 1)
+        else:
+            if heatmap.max() - heatmap.min() > 1e-9:
+                heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
         heatmap = cv2.resize(heatmap, (orig_w, orig_h))
         return heatmap
 
@@ -431,6 +448,16 @@ class GenericAttentionActionVisualizer:
         cam = np.uint8(255 * cam)
         cam = overlay_trajectories(cam, tag, route_overlay_dir, speed_overlay_dir)
         return cam
+
+    def _log_relevance_stats(self, scores: torch.Tensor, label: str) -> None:
+        """Log simple relevance stats for QA."""
+        try:
+            maxv = float(scores.max().item())
+            meanv = float(scores.mean().item())
+            varv = float(scores.var().item())
+            print(f"[RelevanceStats] {label} max={maxv:.4f} mean={meanv:.4f} var={varv:.4f}")
+        except Exception:
+            pass
 
     def _compute_language_relevance(
         self, attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]]
@@ -521,6 +548,8 @@ class GenericAttentionActionVisualizer:
             attn = torch.stack(attn_list, dim=0).mean(dim=0)
             grad = torch.stack(grad_list, dim=0).mean(dim=0)
             cam = avg_heads(attn, grad)  # [S, S]
+            if self.cam_softmax:
+                cam = torch.softmax(cam / max(self.cam_temperature, 1e-6), dim=-1)
             if relevance_vec.shape[-1] != cam.shape[-1]:
                 # Trim/pad relevance vector
                 target_len = cam.shape[-1]
@@ -616,6 +645,9 @@ class GenericAttentionActionVisualizer:
                     continue
                 scores = scores[: num_patches * tokens_per_patch]
                 scores = scores.reshape(num_patches, tokens_per_patch).mean(dim=1)
+            else:
+                if tokens_per_patch is None:
+                    print(f"[WARN] tokens_per_patch missing; skipping token->patch aggregation for image {idx}")
 
             grid_hw = None
             if pixel_shuffle_out is not None:
