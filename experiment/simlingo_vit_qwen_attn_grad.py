@@ -242,9 +242,13 @@ def _install_interleaver_logging(driving_model) -> None:
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        lm_core = getattr(self, "language_model", None)
+        if lm_core is None:
+            lm_core = getattr(self, "model", self)
+
         # If inputs_embeds are provided (e.g., downstream calls), bypass interleaver logging
         if inputs_embeds is not None or pixel_values is None:
-            outputs = self.language_model(
+            outputs = lm_core(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -257,7 +261,7 @@ def _install_interleaver_logging(driving_model) -> None:
             )
         else:
             image_flags = image_flags.squeeze(-1) if image_flags is not None else None
-            input_embeds = self.language_model.get_input_embeddings()(input_ids).clone()
+            input_embeds = lm_core.get_input_embeddings()(input_ids).clone()
 
             vit_embeds = self.extract_feature(pixel_values)
             vit_embeds = vit_embeds[image_flags == 1] if image_flags is not None else vit_embeds
@@ -292,7 +296,7 @@ def _install_interleaver_logging(driving_model) -> None:
             )
             self._interleaver_cache = cache
 
-            outputs = self.language_model(
+            outputs = lm_core(
                 inputs_embeds=input_embeds,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
