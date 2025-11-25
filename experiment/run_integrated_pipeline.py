@@ -218,7 +218,7 @@ def process_scenario(scenario_path: Path, batch_size: int, device: str, base_out
         for viz in action_visualizers:
             viz["pt_source"] = pt_action_source
         for viz in vit_visualizers:
-            viz["pt_source"] = pt_action_source
+            viz["pt_source"] = pt_action_source 
 
         # --- Visualizations (Action) ---
         print(f"[Pipeline] Running Visualizations (Action-dependent)... PT Source: {pt_action_source}")
