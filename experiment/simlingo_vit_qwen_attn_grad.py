@@ -166,7 +166,7 @@ def _install_interleaver_logging(driving_model) -> None:
     lm = getattr(driving_model, "language_model", None)
     if lm is None:
         return
-    core = getattr(lm, "model", lm)
+    core = lm
     if getattr(core, "_interleaver_logging_installed", False):
         return
 
@@ -1174,6 +1174,9 @@ class SimLingoInferenceBaseline:
         # 추가: interleaver 구간 로깅 (mask, mlp1 입출력 등)
         interleaver_info = None
         lm_core = getattr(self.model.language_model, "model", None)
+        # Fix: retrieve from the VLM wrapper where we installed the hook
+        if hasattr(self.model.language_model, "_interleaver_cache"):
+             lm_core = self.model.language_model
         if lm_core is not None:
             cache = getattr(lm_core, "_interleaver_cache", None)
             interleaver_info = self._serialize_interleaver_cache(cache)
