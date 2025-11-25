@@ -213,3 +213,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+
+.gemini/
+gha-creds-*.json
