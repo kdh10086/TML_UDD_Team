@@ -784,13 +784,13 @@ class SimLingoInferenceBaseline:
         self.spline_num_samples = spline_num_samples if spline_num_samples and spline_num_samples > 0 else None
         
         self.debug_info = {}  # Store debug info for .pt file
-        self.debug = False # Initialize debug flag
+        self.debug = True # Initialize debug flag
 
         # ViT/LLM 모두 어텐션을 수집 (기본 켜짐)
         if enable_vision_hooks is None:
-            enable_vision_hooks = True
+            enable_vision_hooks = False
         if enable_language_hooks is None:
-            enable_language_hooks = True
+            enable_language_hooks = False
         self.enable_vision_hooks = enable_vision_hooks
         self.enable_language_hooks = enable_language_hooks
         self.skip_backward = skip_backward
@@ -871,7 +871,7 @@ class SimLingoInferenceBaseline:
             vision_model = getattr(vision_container, "model", None)
             if vision_model is not None:
                 # top-level AutoModel (captures BaseModelOutput.attentions if provided)
-                self.recorder.register_module(vision_model, "vision_model_top", record_grad=False)
+                # self.recorder.register_module(vision_model, "vision_model_top", record_grad=False)
                 # inner vision encoder (e.g., vision_model.encoder.layers)
                 core = getattr(vision_model, "vision_model", vision_model)
                 if hasattr(core, "encoder"):
@@ -897,7 +897,7 @@ class SimLingoInferenceBaseline:
                      lm = lm.base_model
             
             # top-level CausalLM/LLM module (captures BaseModelOutput.attentions if provided)
-            self.recorder.register_module(lm, "language_model_top", record_grad=True)
+            # self.recorder.register_module(lm, "language_model_top", record_grad=True)
             
             layers = []
             if hasattr(lm, "layers"):
@@ -1160,6 +1160,12 @@ class SimLingoInferenceBaseline:
                 attn_tensor = attn.detach().to("cpu")
                 grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
                 
+                if self.debug:
+                    g_stat = "None"
+                    if grad_tensor is not None:
+                        g_stat = f"shape={grad_tensor.shape} min={grad_tensor.min():.4e} max={grad_tensor.max():.4e} mean={grad_tensor.abs().mean():.4e}"
+                    print(f"[DEBUG] Manual Extract Lang {idx}: attn_shape={attn_tensor.shape} grad={g_stat}")
+                
                 # Force save to attention_maps with correct key
                 entry = {"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}
                 key = f"language_block_{idx}_manual"
@@ -1178,6 +1184,12 @@ class SimLingoInferenceBaseline:
                         continue
                     attn_tensor = attn.detach().to("cpu")
                     grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
+                    
+                    if self.debug:
+                        g_stat = "None"
+                        if grad_tensor is not None:
+                            g_stat = f"shape={grad_tensor.shape} min={grad_tensor.min():.4e} max={grad_tensor.max():.4e} mean={grad_tensor.abs().mean():.4e}"
+                        print(f"[DEBUG] Manual Extract Vision {idx}: attn_shape={attn_tensor.shape} grad={g_stat}")
                     # Use a distinct key to avoid collision with hooks if any
                     attention_maps[f"vision_attn_{idx}_output"] = [{"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}]
             # Clear it to avoid stale data

@@ -250,7 +250,7 @@ python experiment/run_integrated_pipeline_interleave.py data/sample_small/01 --b
 
 ## 6-4) PT 파일 확인
 ```bash
-python tools/pt_inspect.py experiment_outputs/integrated/01_20251125_192120/inference_action/data_sample_small_01_action_curv_energy_251125_1921/pt/0001.pt --save-log
+python tools/pt_inspect.py experiment_outputs/integrated/01_20251126_074336/inference_action/data_sample_small_01_action_curv_energy_251126_0743/pt/0001.pt --save-log
 ```
 ## 압축/전송(참고, zip 기준)
 - 압축(현재 경로에 폴더가 있을 때): `zip -r <압축할파일이름>.zip <폴더이름>`  
