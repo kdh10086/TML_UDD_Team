@@ -9,7 +9,6 @@ import itertools
 import os
 import sys
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 
 import torch
 
@@ -36,11 +35,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Max sequence items to show per level (default: 200)",
-    )
-    parser.add_argument(
-        "--save-log",
-        action="store_true",
-        help="Save inspection output to tools/pt_inspect.log (appends)",
     )
     return parser.parse_args()
 
@@ -80,15 +74,6 @@ def _is_simlingo_payload(payload) -> bool:
         and "outputs" in payload
         and "meta" in payload
     )
-
-
-import re
-
-def _natural_keys(text: str):
-    """
-    Strings containing numbers are sorted naturally (1, 2, ... 10).
-    """
-    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
 
 
 def describe_simlingo_payload(payload) -> None:
@@ -160,56 +145,20 @@ def describe_simlingo_payload(payload) -> None:
         if ids is not None:
             print(f"  · token_ids 길이: {_maybe_len(ids)}")
 
-    inter = payload.get("interleaver")
-    if inter:
-        print("- 인터리버 요약")
-        tokens_per_patch = inter.get("tokens_per_patch")
-        num_patches_list = inter.get("num_patches_list")
-        selected_mask = inter.get("selected_mask")
-        if tokens_per_patch is not None:
-            print(f"  · tokens_per_patch: {tokens_per_patch}")
-        if num_patches_list is not None:
-            print(f"  · num_patches_list: {num_patches_list}")
-        if isinstance(selected_mask, torch.Tensor):
-            print(f"  · selected_mask: shape={tuple(selected_mask.shape)} sum={float(selected_mask.sum().item())}")
-
-        def _shape_grad(entry, name: str):
-            if entry is None:
-                return f"{name}: 없음"
-            tensor = entry.get("value") if isinstance(entry, dict) else entry
-            grad = entry.get("grad") if isinstance(entry, dict) else None
-            shape = tuple(tensor.shape) if isinstance(tensor, torch.Tensor) else type(tensor).__name__
-            grad_info = (
-                f"grad shape={tuple(grad.shape)}" if isinstance(grad, torch.Tensor) else "grad 없음"
-            )
-            return f"{name}: {shape}, {grad_info}"
-
-        for key in ["pixel_shuffle_out", "mlp1_input", "mlp1_output", "vit_embeds"]:
-            print(f"  · {_shape_grad(inter.get(key), key)}")
-        if inter.get("mlp1_weight") is not None:
-            w = inter.get("mlp1_weight")
-            print(f"  · mlp1_weight: {tuple(w.shape)}")
-        if inter.get("mlp1_bias") is not None:
-            b = inter.get("mlp1_bias")
-            print(f"  · mlp1_bias: {tuple(b.shape)}")
-
     attention = payload.get("attention") or {}
     if attention:
-        print("- 어텐션 맵 상세 (마지막 스텝만 표시)")
-        for name in sorted(attention, key=_natural_keys):
+        print("- 어텐션 맵 상세")
+        for name in sorted(attention):
             stack = attention[name] or []
-            if not stack:
-                print(f"  · {name}: 0개")
-                continue
-
-            entry = stack[-1]
-            attn_tensor = entry.get("attn")
-            grad_tensor = entry.get("grad")
-            shape = entry.get("shape")
-            if shape is None and isinstance(attn_tensor, torch.Tensor):
-                shape = tuple(attn_tensor.shape)
-            grad_info = "있음" if grad_tensor is not None else "없음"
-            print(f"  · {name} ({len(stack)}개): attn_shape={shape} grad={grad_info}")
+            print(f"  · {name}: {len(stack)}개")
+            for idx, entry in enumerate(stack):
+                attn_tensor = entry.get("attn")
+                grad_tensor = entry.get("grad")
+                shape = entry.get("shape")
+                if shape is None and isinstance(attn_tensor, torch.Tensor):
+                    shape = tuple(attn_tensor.shape)
+                grad_info = "있음" if grad_tensor is not None else "없음"
+                print(f"    [{idx}] attn_shape={shape} grad={grad_info}")
 
     print("")  # spacer
 
@@ -249,41 +198,16 @@ def describe(obj, name: str, indent: int, depth: int, args: argparse.Namespace) 
     print(f"{pad}{name}: {type(obj).__name__}")
 
 
-class Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, data):
-        for s in self.streams:
-            s.write(data)
-
-    def flush(self):
-        for s in self.streams:
-            if not s.closed:
-                try:
-                    s.flush()
-                except ValueError:
-                    pass
-
-
 def main() -> int:
     args = parse_args()
     if not os.path.exists(args.path):
         print(f"File not found: {args.path}", file=sys.stderr)
         return 1
 
-    log_fp = None
-    if args.save_log:
-        log_dir = Path(__file__).resolve().parent
-        log_fp = open(log_dir / "pt_inspect.log", "a", encoding="utf-8")
-        sys.stdout = Tee(sys.stdout, log_fp)
-
     try:
         payload = torch.load(args.path, map_location="cpu")
     except Exception as exc:  # pragma: no cover - defensive
         print(f"Failed to load {args.path}: {exc}", file=sys.stderr)
-        if log_fp:
-            log_fp.close()
         return 1
 
     print(f"# {args.path}")
@@ -291,9 +215,6 @@ def main() -> int:
     if _is_simlingo_payload(payload):
         describe_simlingo_payload(payload)
     describe(payload, "<root>", 0, args.depth, args)
-
-    if log_fp:
-        log_fp.close()
     return 0
 
 

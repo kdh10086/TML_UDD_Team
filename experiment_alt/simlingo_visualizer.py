@@ -324,114 +324,108 @@ class SimLingoVisualizer:
         self._speed_cache[key] = table
         return table
 
-    def get_hook(self, name):
-        def hook(module, input, output):
-            # output is typically (hidden_states, attentions) if output_attentions=True
-            # For Qwen2DecoderLayer, it returns (hidden_states, self_attn_weights, present_key_value)
-            # For InternVL2 vision layers, it's often (hidden_states, attention_weights)
-            
-            attn = None
-            
-            if isinstance(output, tuple):
-                # Check for attention weights in the tuple (usually a 4D tensor)
-                for item in output:
-                    if isinstance(item, torch.Tensor) and item.ndim == 4:
-                        attn = item
-                        break
-            elif isinstance(output, torch.Tensor):
-                 # If the module directly outputs the attention tensor
-                 if output.ndim == 4:
-                     attn = output
-            
-            if attn is not None:
-                # Capture gradient for Chefer's rule
-                if attn.requires_grad:
-                    def grad_hook(grad):
-                        self.grad_maps[name] = grad
-                    attn.register_hook(grad_hook)
-                
-                self.attn_maps[name] = attn.detach()
-                 
-        return hook
-
-    def _find_layers(self, module):
-        # Robustly find the transformer layer list using BFS
-        queue = [(module, 0)]
-        visited = set()
-        
-        while queue:
-            curr, depth = queue.pop(0)
-            if depth > 4: continue
-            if curr in visited: continue
-            visited.add(curr)
-            
-            # Check for common layer list names
-            for name in ["layers", "h", "blocks", "block"]:
-                if hasattr(curr, name):
-                    attr = getattr(curr, name)
-                    if isinstance(attr, torch.nn.ModuleList):
-                        return attr
-            
-            # Recurse into children (bfs)
-            # Prioritize 'model', 'base_model', 'transformer' attributes
-            for name in ["model", "base_model", "transformer", "backbone"]:
-                if hasattr(curr, name):
-                    child = getattr(curr, name)
-                    if isinstance(child, torch.nn.Module):
-                        queue.append((child, depth + 1))
-                        
-            # Also check all children if specific names not found (slower but safer)
-            # But limit to immediate children to avoid explosion
-            if depth < 2:
-                for name, child in curr.named_children():
-                    if isinstance(child, torch.nn.Module):
-                        queue.append((child, depth + 1))
-                        
-        return None
-
     def _register_hooks(self, method="all"):
         self.hooks = []
         self.attn_maps = {}
         self.grad_maps = {}
 
-        # Register hooks for Vision Encoder
-        # Assuming InternVL2 structure: model.vision_model.image_encoder.model.vision_model.encoder.layers
-        vision_layers = self.model.vision_model.image_encoder.model.vision_model.encoder.layers
-        for i, layer in enumerate(vision_layers):
-            # Target the attention dropout layer directly if possible, or the block
-            target = None
-            if hasattr(layer, 'attn') and hasattr(layer.attn, 'attn_drop'):
-                target = layer.attn.attn_drop
-            elif hasattr(layer, 'attention') and hasattr(layer.attention, 'attn_drop'):
-                target = layer.attention.attn_drop
-            
-            # Fallback to layer if specific dropout not found or if it's not a module
-            if target is not None and not isinstance(target, torch.nn.Module):
-                target = None
+        def get_hook(name, save_grad=False):
+            def hook(module, input, output):
+                # Debug: Inspect output structure for the first layer
+                if "layer_0" in name and "vision" in name:
+                    # Print Module Structure to find inner attention
+                    # print(f"DEBUG: Hook {name} Module Type: {type(module)}")
+                    pass
+                        
+                    # print(f"DEBUG: Hook {name} Output Type: {type(output)}")
                 
-            if target is None:
-                target = layer # Hook the entire layer as a fallback
+                # Try to extract attn
+                attn = None
+                context = None
                 
-            self.hooks.append(target.register_forward_hook(self.get_hook(f"vision_layer_{i}")))
+                if isinstance(output, tuple):
+                    context = output[0]
+                    if len(output) > 1:
+                        attn = output[1] # [B, H, S, S]
+                elif isinstance(output, torch.Tensor):
+                    # If hooking attn_drop, output IS the attention map
+                    # Check dimensions to be safe: [B, H, S, S] -> dim=4
+                    if output.dim() == 4:
+                        attn = output
+                        context = output # For debug consistency
+                    else:
+                        context = output
+                
+                # Debug: Check context gradients (Layer Output)
+                if save_grad and hasattr(context, "requires_grad") and context is not None and context.requires_grad:
+                    def context_grad_hook(grad):
+                        if "layer_0" in name and "vision" in name:
+                            print(f"DEBUG: Hook {name} Context (Output) Grad Mean: {grad.float().mean():.6e}")
+                    context.register_hook(context_grad_hook)
 
-        # Register hooks for Language Model (only if needed)
-        if method in ["generic", "all", "ours"]:
-            llm_layers = self._find_layers(self.model.language_model)
-            
-            if llm_layers is None:
-                print(f"WARNING: Could not find LLM layers for hooking. Model Type: {type(self.model.language_model)}")
-                # Try one last hardcoded fallback for Qwen2
-                try:
-                    llm_layers = self.model.language_model.model.model.layers
-                    print("DEBUG: Found layers via hardcoded fallback.")
-                except:
+                if attn is None: 
+                    if "layer_0" in name and "vision" in name:
+                        print(f"DEBUG: Hook {name} - Attn is None! Output shape: {output.shape if hasattr(output, 'shape') else 'N/A'}")
                     return
 
-            print(f"DEBUG: Found {len(llm_layers)} LLM layers.")
-            for i, layer in enumerate(llm_layers):
-                # For LLM layers, hooking the layer directly is often sufficient if output_attentions=True
-                # as the attention weights will be part of the layer's output tuple.
-                self.hooks.append(layer.register_forward_hook(self.get_hook(f"language_layer_{i}")))
+                # Debug: Check if attn is attached to graph
+                if "layer_0" in name and "vision" in name:
+                     print(f"Hook {name} captured attn. Shape: {attn.shape}, Requires Grad: {attn.requires_grad}")
+
+                self.attn_maps[name] = attn.detach()
+                
+                if save_grad:
+                    if attn.requires_grad:
+                        def grad_hook(grad):
+                            self.grad_maps[name] = grad.detach()
+                            if "layer_0" in name and "vision" in name:
+                                print(f"DEBUG: Hook {name} Attn Grad Mean: {grad.float().mean():.6e}")
+                        attn.register_hook(grad_hook)
+                    else:
+                        if "layer_0" in name and "vision" in name:
+                            print(f"WARNING: Hook {name} cannot register grad hook because attn.requires_grad is False")
+            return hook
+
+        # 1. Vision Encoder Hooks (for All methods)
+        vision_model = self.model.vision_model.image_encoder.model.vision_model
+        for i, layer in enumerate(vision_model.encoder.layers):
+            # Target the dropout layer after softmax (Standard way to get attention map in ViT)
+            # Structure: layer -> attn (InternAttention) -> attn_drop (Dropout)
+            if hasattr(layer, "attn") and hasattr(layer.attn, "attn_drop"):
+                target = layer.attn.attn_drop
+            elif hasattr(layer, "attention") and hasattr(layer.attention, "attn_drop"):
+                target = layer.attention.attn_drop
+            else:
+                print(f"WARNING: Vision layer {i} structure unknown, cannot find attn_drop. Hooking layer instead.")
+                target = layer
+            
+            # Generic needs grad, others don't (but we capture grad if we run generic)
+            save_grad = (method in ["generic", "all", "ours"])
+            self.hooks.append(target.register_forward_hook(get_hook(f"vision_layer_{i}", save_grad=save_grad)))
+
+        # 2. Language Model Hooks (For Ours/Generic if requested)
+        if method in ["generic", "all", "ours"]:
+            lm = self.model.language_model.model
+            layers = getattr(lm, "layers", getattr(getattr(lm, "model", None), "layers", []))
+            for i, layer in enumerate(layers):
+                # Try to find attention dropout in LLM layer
+                # InternLM2: layer.attention.attn_drop? or layer.self_attn.dropout?
+                target = None
+                if hasattr(layer, "attention"):
+                    if hasattr(layer.attention, "attn_drop"): target = layer.attention.attn_drop
+                    elif hasattr(layer.attention, "dropout"): target = layer.attention.dropout
+                elif hasattr(layer, "self_attn"):
+                    if hasattr(layer.self_attn, "attn_drop"): target = layer.self_attn.attn_drop
+                    elif hasattr(layer.self_attn, "dropout"): target = layer.self_attn.dropout
+                    elif hasattr(layer.self_attn, "attention_dropout"): target = layer.self_attn.attention_dropout
+                
+                if target is None:
+                    # Fallback to layer and print structure to debug LLM
+                    target = layer
+                    if i == 0:
+                        print(f"DEBUG: LLM Layer 0 Structure (Cannot find dropout):\n{str(layer)}")
+                
+                self.hooks.append(target.register_forward_hook(get_hook(f"language_layer_{i}", save_grad=True)))
 
     def _remove_hooks(self):
         for h in self.hooks:
@@ -501,7 +495,7 @@ class SimLingoVisualizer:
             method_dir.mkdir(parents=True, exist_ok=True)
             
             if method == "generic":
-                heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps, meta)
+                heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps)
             elif method == "rollout":
                 heatmap = self._get_rollout_relevance(self.attn_maps)
             elif method == "flow":
@@ -630,48 +624,136 @@ class SimLingoVisualizer:
 
     # --- Visualization Methods ---
 
-
-
-    def _get_generic_relevance(self, attn_maps, grad_maps, meta):
-        # Generic Attention on Language Model (as per baseline)
-        # Filter for Language Layers
-        lm_maps = {k: v for k, v in attn_maps.items() if "language" in k}
+    def generate_visualization(
+        self, 
+        image_path: Path, 
+        output_dir: Path, 
+        methods: List[str] = ["generic", "rollout", "raw", "flow", "ours"],
+        metric: str = "curv_energy",
+        current_speed: float = 0.0,
+        explain_mode: str = "action" # "action" or "text"
+    ):
+        self.model.zero_grad()
+        driving_input, meta = self._prepare_driving_input(image_path, current_speed)
         
-        num_layers = len(lm_maps)
+        # Register Hooks
+        run_generic_or_ours = "generic" in methods or "ours" in methods or "all" in methods
+        self._register_hooks(method="all" if run_generic_or_ours else "vision")
+
+        # Forward
+        outputs = self.model(driving_input)
+        pred_speed_wps, pred_route, _ = outputs
+        
+        # Debug: Check output gradients
+        print(f"Pred Route Requires Grad: {pred_route.requires_grad}")
+        if not pred_route.requires_grad:
+            print("CRITICAL WARNING: Model output does not require gradients. Check model configuration.")
+        
+        # Backward (if needed for Generic/Ours)
+        if run_generic_or_ours:
+            if explain_mode == "action":
+                metric_cfg = KINEMATIC_METRICS.get(metric, KINEMATIC_METRICS["curv_energy"])
+                if metric_cfg["source"] == "route":
+                    target = metric_cfg["fn"](pred_route)
+                else:
+                    target = metric_cfg["fn"](pred_speed_wps)
+            else:
+                # Text mode placeholder
+                target = pred_route.sum() * 0 
+                pass
+
+            if target.requires_grad:
+                self.model.zero_grad()
+                target.backward()
+                
+                # Debug: Check if gradients are flowing
+                print(f"Target Value: {target.item():.6f}, Requires Grad: {target.requires_grad}")
+                if self.grad_maps:
+                    first_key = list(self.grad_maps.keys())[0]
+                    last_key = list(self.grad_maps.keys())[-1]
+                    print(f"Grad Map [{first_key}] Mean: {self.grad_maps[first_key].float().mean():.6e}, Max: {self.grad_maps[first_key].max():.6e}")
+                    print(f"Grad Map [{last_key}] Mean: {self.grad_maps[last_key].float().mean():.6e}, Max: {self.grad_maps[last_key].max():.6e}")
+                else:
+                    print("WARNING: No gradients captured in grad_maps!")
+            else:
+                print("CRITICAL: Target does not require grad, cannot backward.")
+        
+        # Generate Visualizations
+        for method in methods:
+            # Create method-specific subdirectory
+            method_dir = output_dir / method
+            method_dir.mkdir(parents=True, exist_ok=True)
+            
+            if method == "generic":
+                heatmap = self._get_generic_relevance(self.attn_maps, self.grad_maps)
+            elif method == "rollout":
+                heatmap = self._get_rollout_relevance(self.attn_maps)
+            elif method == "flow":
+                heatmap = self._get_flow_relevance(self.attn_maps)
+            elif method == "raw":
+                heatmap = self._get_raw_attention(self.attn_maps)
+            elif method == "ours":
+                heatmap = self._get_ours_relevance(self.attn_maps, self.grad_maps, meta)
+            else:
+                continue
+            
+            # Debug: Print heatmap stats
+            if heatmap.numel() > 0:
+                print(f"[{method}] Heatmap Stats - Min: {heatmap.min():.4f}, Max: {heatmap.max():.4f}, Mean: {heatmap.mean():.4f}")
+                
+            # 1. Create Heatmap Overlay (Original + Heatmap)
+            overlay_bgr = self._create_heatmap_overlay(heatmap, image_path, meta)
+            if overlay_bgr is None: continue
+            
+            # 2. Convert to PIL for Trajectory Drawing
+            overlay_rgb = cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB)
+            overlay_pil = Image.fromarray(overlay_rgb)
+            
+            # 3. Draw Trajectory on top of Heatmap
+            # Save as {stem}.png inside the method folder
+            self._project_and_draw_points(
+                pred_route,
+                (meta["original_height"], meta["original_width"]),
+                (0, 0, 255, 255), # Red
+                3,
+                method_dir / f"{image_path.stem}.png",
+                background_image=overlay_pil
+            )
+        
+        self._remove_hooks()
+        self.attn_maps = {}
+        self.grad_maps = {}
+
+    def _get_generic_relevance(self, attn_maps, grad_maps):
+        # Filter for Vision Layers only for the Image Heatmap
+        # (Even if we hooked LLM, the image heatmap comes from ViT layers)
+        vision_maps = {k: v for k, v in attn_maps.items() if "vision" in k}
+        
+        num_layers = len(vision_maps)
         if num_layers == 0: return torch.zeros(1)
         
-        sorted_keys = sorted(lm_maps.keys(), key=lambda x: int(x.split("_")[-1]))
+        # Sort by layer index
+        sorted_keys = sorted(vision_maps.keys(), key=lambda x: int(x.split("_")[-1]))
         
-        first_map = lm_maps[sorted_keys[0]]
+        first_map = vision_maps[sorted_keys[0]]
         B, H, S, S = first_map.shape
-        
-        # Initialize Relevance with Identity
+        # Explicitly use float32 for R
         R = torch.eye(S, device=self.device, dtype=torch.float32).unsqueeze(0).expand(B, S, S)
         
         for name in sorted_keys:
-            attn = lm_maps[name].float()
+            attn = vision_maps[name].float()
             grad = grad_maps.get(name, torch.zeros_like(attn)).float()
             
-            # Chefer Rule: E_h [ (A * G)^+ ]
             cam = attn * grad
-            cam = cam.clamp(min=0).mean(dim=1) # [B, S, S]
-            
-            # R = R + CAM * R
+            cam = cam.clamp(min=0).mean(dim=1)
             R = R + torch.bmm(cam, R)
             
-        # Match baseline: Use the last token as the target
-        target_idx = -1
-        
-        image_indices = meta.get("image_token_indices", [])
-        if not image_indices:
-            return torch.zeros(1)
-            
-        # Select Global View tokens (last num_image_tokens_per_patch)
-        num_tokens = meta.get("num_image_tokens_per_patch", 256)
-        # Note: We use all tokens (Tiles + Global) as per latest fix
-            
-        scores = R[0, target_idx, image_indices]
-        return scores
+        # FIX: InternVL ignores CLS token. We must aggregate relevance w.r.t ALL patch tokens.
+        # R[-1] is the last batch item (Global View).
+        # R[-1, 1:, 1:] is the Patch-to-Patch relevance matrix.
+        # Summing over dim 0 (rows) gives total relevance of each patch to the entire output embedding set.
+        if S <= 1: return torch.zeros(1) # Ensure there are patches beyond CLS token
+        return R[-1, 1:, 1:].sum(dim=0)
 
     def _get_ours_relevance(self, attn_maps, grad_maps, meta):
         # "Ours" = Generic Attention on Language Model Layers
@@ -703,31 +785,36 @@ class SimLingoVisualizer:
         # Extract Relevance of Image Tokens w.r.t Target
         # Target is usually the last token (or the token where classification happens)
         # In SimLingo action mode, we pool or use the last token.
+        # Let's assume the last token in the sequence is the "source" of relevance.
+        # R[0, last_token_idx, :] -> Relevance of all tokens to the last token.
+        
         # Note: R is [B, S, S]. R[b, i, j] is relevance of token j to token i.
         # We want relevance OF image tokens TO the target token.
         # So we look at row 'target_idx'.
         
+        target_idx = S - 1 # Last token
+        
         # Get image token indices
         image_indices = meta.get("image_token_indices", [])
         if not image_indices:
+            print("[Ours] Warning: No image tokens found in prompt!")
             return torch.zeros(1)
             
         # FIX: InternVL concatenates tokens as [Tile1, Tile2, ..., GlobalView].
         # To visualize the whole image properly, we should focus on the Global View tokens.
-        # These are the LAST 'num_image_tokens_per_patch' tokens in the image sequence.
-        num_tokens = meta.get("num_image_tokens_per_patch", 256)
+        # These are the LAST 'num_patches' tokens in the image sequence.
+        num_patches = meta.get("num_patches", 256) # Default to 256 if not found, but usually passed in meta
         
-        # If we have more tokens than num_tokens, it means we have tiles. Take the last ones.
-        if len(image_indices) > num_tokens:
-            image_indices = image_indices[-num_tokens:]
+        # If we have more tokens than num_patches, it means we have tiles. Take the last ones.
+        if len(image_indices) > num_patches:
+            print(f"[Ours] Selecting last {num_patches} tokens (Global View) from {len(image_indices)} total image tokens.")
+            image_indices = image_indices[-num_patches:]
+        else:
+            print(f"[Ours] Found {len(image_indices)} tokens (likely just Global View).")
             
-        # Match baseline: Use the last token as the target
-        target_idx = -1
-        
         # Extract scores
-        num_tokens = meta.get("num_image_tokens_per_patch", 256)
-        # Note: We use all tokens (Tiles + Global) as per latest fix
-            
+        # For LLM, B is usually 1 (unless batching multiple prompts).
+        # We take batch 0.
         scores = R[0, target_idx, image_indices] # [Num_Image_Tokens]
         
         return scores
@@ -789,81 +876,33 @@ class SimLingoVisualizer:
     def _create_heatmap_overlay(self, heatmap, image_path, meta):
         if heatmap.numel() == 0: return None
         
+        n_patches = heatmap.shape[0]
+        grid_size = int(np.sqrt(n_patches))
+        
+        # Ensure heatmap is detached and float before normalization
         heatmap = heatmap.float().detach()
-        n_tokens = heatmap.shape[0]
-        chunk_size = meta.get("num_image_tokens_per_patch", 256)
-        
-        orig_h, orig_w = meta.get("original_height", 224), meta.get("original_width", 224)
-        
-        # Helper to process a heatmap chunk
-        def process_chunk(chunk, is_global=False):
-            n = chunk.shape[0]
-            if n == 0: return np.zeros((orig_h, orig_w), dtype=np.float32)
-            
-            # Determine grid dimensions
-            # Priority 1: Perfect Square (Most common for ViT/Global)
-            sqrt_n = int(np.sqrt(n))
-            if sqrt_n * sqrt_n == n:
-                h_grid, w_grid = sqrt_n, sqrt_n
-            else:
-                # Priority 2: Aspect Ratio Matching (For Tiles or non-square Global)
-                target_ratio = orig_h / orig_w
-                best_w = 1
-                min_error = float('inf')
-                for w in range(1, int(np.sqrt(n)) + 1):
-                    if n % w == 0:
-                        h = n // w
-                        # Check (h, w)
-                        err1 = abs((h / w) - target_ratio)
-                        if err1 < min_error:
-                            min_error = err1
-                            best_w = w
-                            best_h = h
-                        # Check (w, h)
-                        err2 = abs((w / h) - target_ratio)
-                        if err2 < min_error:
-                            min_error = err2
-                            best_w = h
-                            best_h = w
-                h_grid, w_grid = best_h, best_w
-            
-            print(f"DEBUG: Chunk n={n}, is_global={is_global} -> Grid ({h_grid}, {w_grid})")
 
-            try:
-                map_2d = chunk.view(h_grid, w_grid).cpu().numpy()
-                map_resized = cv2.resize(map_2d, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-                return map_resized
-            except Exception as e:
-                print(f"WARNING: Reshape failed for n={n} to ({h_grid}, {w_grid}). Error: {e}")
-                # Fallback to 1D
-                try:
-                    map_2d = chunk.view(1, n).cpu().numpy()
-                    return cv2.resize(map_2d, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-                except:
-                    return np.zeros((orig_h, orig_w), dtype=np.float32)
-
-        # Split into Tiles and Global if applicable
-        if n_tokens > chunk_size:
-            # We have Tiles + Global
-            tiles_heatmap = heatmap[:-chunk_size]
-            global_heatmap = heatmap[-chunk_size:]
-            
-            map_tiles = process_chunk(tiles_heatmap, is_global=False)
-            map_global = process_chunk(global_heatmap, is_global=True)
-            
-            # Combine: Sum them up (Model sees both)
-            combined_map = map_tiles + map_global
+        # Handle mismatch (e.g. if patches != square)
+        if grid_size * grid_size != n_patches:
+            # If not a perfect square, try to reshape to a 1D array for resizing
+            # or handle cases where it's not easily reshaped to 2D.
+            # For now, if it's not square, we'll just treat it as a 1D array
+            # and let cv2.resize handle the interpolation.
+            heatmap_2d = heatmap.view(1, n_patches).cpu().numpy()
         else:
-            # Only Global (or single patch)
-            combined_map = process_chunk(heatmap, is_global=True)
+            heatmap_2d = heatmap.view(grid_size, grid_size).cpu().numpy()
             
+        orig_h, orig_w = meta["original_height"], meta["original_width"]
+        
         # Robust Normalization
-        if combined_map.max() == combined_map.min():
-            heatmap_norm = np.zeros_like(combined_map, dtype=np.uint8)
+        # If max == min, normalize returns 0. Avoid this.
+        if heatmap_2d.max() == heatmap_2d.min():
+            heatmap_norm = np.zeros_like(heatmap_2d, dtype=np.uint8)
         else:
-            heatmap_norm = cv2.normalize(combined_map, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            heatmap_norm = cv2.normalize(heatmap_2d, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
         
-        heatmap_img = cv2.applyColorMap(heatmap_norm, cv2.COLORMAP_JET)
+        heatmap_img = cv2.resize(heatmap_norm, (orig_w, orig_h))
+        heatmap_img = cv2.applyColorMap(heatmap_img, cv2.COLORMAP_JET)
         
         orig_img = cv2.imread(str(image_path))
         if orig_img is None: return None

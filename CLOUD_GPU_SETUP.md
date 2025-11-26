@@ -82,7 +82,6 @@ git clone --recursive https://github.com/kdh10086/TML_UDD_Team.git && cd TML_UDD
 `git config --global credential.helper store` 설정으로 토큰 캐싱까지 완료합니다. 남은 수동 작업(모델 HF clone, 데이터 배치 등)을 안내합니다.
 
 ## 3) 필수 시스템 패키지(우분투)
-> **Note**: `tools/cloud_bootstrap.sh`가 성공했다면 이 단계는 자동으로 수행되었으므로 건너뛰세요. 실패했을 경우에만 수동으로 진행합니다.
 ```bash
 # sudo가 없으면 sudo를 빼고 실행
 apt-get update
@@ -108,7 +107,6 @@ git config --global user.email "<your email>"
 ```
 
 ## 4) 체크포인트 및 샘플 데이터 다운로드
-> **Note**: `tools/cloud_bootstrap.sh`가 성공했다면 이 단계는 자동으로 수행되었으므로 건너뛰세요. 실패했을 경우에만 수동으로 진행합니다.
 ### SimLingo 체크포인트(HuggingFace)
 ```bash
 cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
@@ -116,12 +114,12 @@ cd checkpoints/ && git lfs clone https://huggingface.co/RenzKa/simlingo
 
 ### Persistent Storage에 저장된 데이터셋을 /UDD_TML_Team/data/로 복사, 압축해제
 ```bash
-#샘플 데이터셋 복사 (필수)
+#샘플 데이터셋 복사
 unzip /mnt/data1/new_sample_dataset.zip -d /root/TML_UDD_Team/data/
-#샘플 작은 데이터셋 복사 (필수)
-unzip /mnt/data1/sample_small.zip -d /root/TML_UDD_Team/data/
 #원본 데이터셋 복사 (옵션)
 unzip /mnt/data1/DREYEVE_DATA_filtered.zip -d /root/TML_UDD_Team/data/
+#샘플 작은 데이터셋 복사 (옵션)
+unzip /mnt/data1/sample_small.zip -d /root/TML_UDD_Team/data/
 ```
 
 ## 5) 데이터 배치
@@ -196,22 +194,25 @@ TEXT_TOKEN_STRATEGIES = ("max", "last", "index")
 - 루트에서 실행 예시(샘플 데이터, 액션 모드 캐시):
 ```bash
 # Raw attention
- python -m experiment.vit_raw_attention \
-  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
+python -m experiment.vit_raw_attention \
   --output_dir experiment_outputs/vit_raw \
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --scene_dir data/sample_scene \
   --layer_index -1 --head_strategy mean --colormap JET --alpha 0.5
 
 # Attention rollout
  python -m experiment.vit_attention_rollout \
-  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
   --output_dir experiment_outputs/vit_rollout \
-  --start_layer 0 --residual_alpha 0.5 --colormap JET --alpha 0.5
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --scene_dir data/sample_scene \
+  --residual_alpha 0.5 --start_layer 0 --colormap JET --alpha 0.5
 
 # Attention flow
  python -m experiment.vit_attention_flow \
-  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
   --output_dir experiment_outputs/vit_flow \
-  --discard_ratio 0.9 --residual_alpha 0.5 --colormap JET --alpha 0.5
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --scene_dir data/sample_scene \
+  --residual_alpha 0.5 --discard_ratio 0.0 --colormap JET --alpha 0.5
 ```
 - 캐시가 없으면 실행 불가(모델 재실행 없음). `.pt`에 비전 어텐션이 포함돼 있는지 먼저 확인하세요.
 
@@ -221,37 +222,21 @@ TEXT_TOKEN_STRATEGIES = ("max", "last", "index")
 ```bash
 # 텍스트 모드 Generic (캐시 전용)
  python -m experiment.generic_attention_baseline \
-  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_text_max_251124_1416 \
-  --output_dir experiment_outputs/generic_attention \
-  --text_token_strategy max \
-  --colormap JET \
-  --alpha 0.5
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_text_max_XXXX \
+  --output_dir experiment_outputs/generic_text \
+  --scene_dir data/sample_scene \
+  --text_token_strategy max --text_token_index -1 \
+  --colormap JET --alpha 0.5
 
 # 액션 모드 Generic (캐시 전용, ours.py)
  python -m experiment.ours \
-  --scene_dir experiment_outputs/simlingo_inference/data_sample_small_01_action_curv_energy_251124_1325 \
-  --output_dir experiment_outputs/ours \
-  --colormap JET \
-  --alpha 0.5
+  --payload_root experiment_outputs/simlingo_inference/TML_UDD_Team_data_sample_scene_action_curv_energy_251123_2207 \
+  --output_dir experiment_outputs/generic_action \
+  --scene_dir data/sample_scene \
+  --colormap JET --alpha 0.5
 ```
-- `--payload_root`는 선택 사항이며, 생략 시 `--scene_dir/pt`를 자동으로 탐색합니다.
+- `--payload_root`는 필수이며, 모델을 다시 돌리지 않습니다.
 
-## 6-3) 통합 파이프라인 실행 (권장)
-Inference(Action/Text)와 5가지 Visualization을 한 번에 실행하며, 100장 단위 배치로 처리합니다.
-```bash
-# 통합 파이프라인 실행 (배치 크기 100)
-python experiment/run_integrated_pipeline.py data/sample_small/01 --batch_size 100
-
-python experiment/run_integrated_pipeline_interleave.py data/sample_small/01 --batch_size 100
-
-```
-- 결과는 `experiment_outputs/integrated/<ScenarioName>_<DateTime>/` 아래에 메소드별로 정리됩니다.
-- 중간에 중단되더라도 처리된 배치의 결과는 저장됩니다.
-
-## 6-4) PT 파일 확인
-```bash
-python tools/pt_inspect.py experiment_outputs/integrated/01_20251126_074336/inference_action/data_sample_small_01_action_curv_energy_251126_0743/pt/0001.pt --save-log
-```
 ## 압축/전송(참고, zip 기준)
 - 압축(현재 경로에 폴더가 있을 때): `zip -r <압축할파일이름>.zip <폴더이름>`  
   예: `zip -r experiment_outputs.zip experiment_outputs` → `./experiment_outputs.zip` 생성
@@ -273,12 +258,8 @@ cd /mnt/data1/
 #샘플 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/1CfmRcnSZepCG0k9J4n5lkQZXd_tTxr7B/view?usp=drive_link' -O new_sample_dataset.zip
 #DREYEVE_DATA_filtered 데이터셋
-gdown --fuzzy 'https://drive.google.com/file/d/16WOxAYcr6TONqOBDwvX40uoXVzK18Bmw/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
+gdown --fuzzy 'https://drive.google.com/file/d/1-VgGkHAf5WNOCEISZXjNazaaEn3vE9r0/view?usp=sharing' -O DREYEVE_DATA_filtered.zip
 #샘플 작은 데이터셋
 gdown --fuzzy 'https://drive.google.com/file/d/1KgWRInvxE9hTf_hKMo58-fzZOAGIsaP5/view?usp=sharing' -O sample_small.zip
 
 ```
-
-
-
-
