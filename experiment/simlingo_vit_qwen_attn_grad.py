@@ -1111,13 +1111,43 @@ class SimLingoInferenceBaseline:
         # 추가: 언어 모델 outputs.attentions를 레이어별로 저장 (grad 포함)
         # DrivingModel이 attentions를 반환하지 않으므로, InternVLChatModel에 stash된 값을 가져옵니다.
         attn_seq = None
+        
+        if self.debug:
+            print(f"[DEBUG] Checking for all_attentions...")
+            if hasattr(self.model, "language_model"):
+                print(f"[DEBUG] self.model.language_model type: {type(self.model.language_model)}")
+                if hasattr(self.model.language_model, "all_attentions"):
+                    print("[DEBUG] Found all_attentions in self.model.language_model")
+                else:
+                    print("[DEBUG] all_attentions NOT found in self.model.language_model")
+                    
+                if hasattr(self.model.language_model, "model"):
+                     print(f"[DEBUG] self.model.language_model.model type: {type(self.model.language_model.model)}")
+                     if hasattr(self.model.language_model.model, "all_attentions"):
+                        print("[DEBUG] Found all_attentions in self.model.language_model.model")
+            
+            # Check where _install_interleaver_logging put it
+            if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "image_encoder"):
+                 lm_core = getattr(self.model.vision_model.image_encoder, "model", None)
+                 if lm_core:
+                     print(f"[DEBUG] vision_model.image_encoder.model type: {type(lm_core)}")
+                     if hasattr(lm_core, "all_attentions"):
+                         print("[DEBUG] Found all_attentions in vision_model.image_encoder.model")
+
         # Try to find stashed attentions in the model hierarchy
         if hasattr(self.model, "language_model") and hasattr(self.model.language_model, "all_attentions"):
                 attn_seq = self.model.language_model.all_attentions
-                # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.all_attentions")
         elif hasattr(self.model, "language_model") and hasattr(self.model.language_model, "model") and hasattr(self.model.language_model.model, "all_attentions"):
                 attn_seq = self.model.language_model.model.all_attentions
-                # print(f"[DEBUG] Retrieved {len(attn_seq) if attn_seq else 0} layers from self.model.language_model.model.all_attentions")
+        
+        # New fallback: check vision_model path if that's where it was patched
+        if attn_seq is None:
+             if hasattr(self.model, "vision_model") and hasattr(self.model.vision_model, "image_encoder"):
+                 lm_core = getattr(self.model.vision_model.image_encoder, "model", None)
+                 if lm_core and hasattr(lm_core, "all_attentions"):
+                     attn_seq = lm_core.all_attentions
+                     if self.debug:
+                         print("[DEBUG] Retrieved all_attentions from vision_model.image_encoder.model")
         
         # Fallback: check outputs just in case
         if attn_seq is None:
