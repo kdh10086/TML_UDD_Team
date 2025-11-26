@@ -824,7 +824,7 @@ class SimLingoInferenceBaseline:
         )
         self.model = self._build_model()
         # 최종 forward의 어텐션/grad만 유지 (레이어/헤드별)
-        self.recorder = AttentionRecorder(keep_last_only=False)
+        self.recorder = AttentionRecorder(keep_last_only=True)
         self._register_attention_hooks()
         self._speed_cache: Dict[str, Dict[str, float]] = {}
 
@@ -1162,7 +1162,7 @@ class SimLingoInferenceBaseline:
                 
                 # Force save to attention_maps with correct key
                 entry = {"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}
-                key = f"language_attn_layer_{idx}"
+                key = f"language_block_{idx}_manual"
                 # Overwrite or append? The user wants ALL layers. 
                 # If recorder captured something, it might be partial. We trust this explicit capture more.
                 attention_maps[key] = [entry]
@@ -1179,7 +1179,7 @@ class SimLingoInferenceBaseline:
                     attn_tensor = attn.detach().to("cpu")
                     grad_tensor = attn.grad.detach().to("cpu") if attn.grad is not None else None
                     # Use a distinct key to avoid collision with hooks if any
-                    attention_maps[f"vision_attn_layer_{idx}_output"] = [{"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}]
+                    attention_maps[f"vision_attn_{idx}_output"] = [{"attn": attn_tensor, "grad": grad_tensor, "shape": tuple(attn.shape)}]
             # Clear it to avoid stale data
             vision_model_instance.vision_attentions = None
 

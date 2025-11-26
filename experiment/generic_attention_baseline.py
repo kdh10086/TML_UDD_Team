@@ -96,6 +96,10 @@ class GenericAttentionTextVisualizer:
         if not (0.0 <= alpha <= 1.0):
             raise ValueError("alpha must be between 0 and 1.")
         self.alpha = alpha
+        self.residual_alpha = 0.5  # Default from ours.py
+        self.propagation_mode = "llm_to_vision"
+        self.cam_softmax = False
+        self.cam_temperature = 1.0
         self.img_context_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
         self.trajectory_overlay_root = trajectory_overlay_root
         
@@ -280,6 +284,7 @@ class GenericAttentionTextVisualizer:
     ) -> Path:
         attention_maps = payload.get("attention") or {}
         text_outputs = payload.get("text_outputs")
+        interleaver = payload.get("interleaver") or {}
         target_info = payload.get("target_info", {})
         if not attention_maps or text_outputs is None or target_info.get("type") != "text":
             raise RuntimeError("Cached payload is missing attention/text info for text-mode Generic Attention.")
@@ -287,19 +292,14 @@ class GenericAttentionTextVisualizer:
         self.num_image_token = int(meta["num_image_tokens_per_patch"])
         prompt_token_ids = self._rebuild_prompt_token_ids(meta, payload.get("input_speed_mps", 0.0))
         moved_attention = self._move_attention_maps_to_device(attention_maps, self.device)
-        token_ids = torch.tensor(text_outputs["token_ids"], device=self.device)
-        token_scores = torch.tensor(text_outputs["token_scores"], device=self.device)
-        text_features = {
-            "token_ids": token_ids,
-            "token_scores": token_scores,
-            "token_strings": text_outputs.get("token_strings", []),
-            "decoded_text": text_outputs.get("decoded_text", ""),
-        }
+        
+        # Compute LLM relevance
         relevance = self._compute_language_relevance(moved_attention)
+        
+        # Determine source token index
         prompt_len = len(prompt_token_ids)
         generated_len = len(text_outputs.get("token_ids", []))
         seq_len = relevance.shape[0]
-        # If recording shorter than expected, clip lengths safely
         if seq_len < prompt_len + generated_len:
             print(
                 f"[WARN] seq_len {seq_len} < prompt+gen {prompt_len + generated_len}; clipping indices for {image_path.name}"
@@ -309,25 +309,223 @@ class GenericAttentionTextVisualizer:
         token_index = int(target_info.get("token_index", generated_len - 1))
         token_index = max(0, min(token_index, max(generated_len - 1, 0)))
         source_index = min(prompt_len + token_index, seq_len - 1)
+        
         image_token_positions = [
             pos for pos in self._select_image_token_positions(prompt_token_ids, meta["num_total_image_tokens"])
             if pos < seq_len
         ]
         if not image_token_positions:
             raise RuntimeError("No image token positions within recorded sequence.")
-        token_scores = relevance[source_index, image_token_positions]
-        heatmap = self._scores_to_heatmap(token_scores, meta)
-        
-        if raw_output_dir:
-            heatmap_uint8 = np.uint8(255 * heatmap)
-            raw_path = raw_output_dir / f"{image_path.stem}.png"
-            Image.fromarray(heatmap_uint8).save(raw_path)
+            
+        # language-side relevance -> image tokens
+        token_scores = relevance[source_index, image_token_positions].clone().detach().to(self.device)
 
-        # Save Overlay
-        overlay = self._render_overlay(image_path, heatmap, image_path.stem, route_overlay_dir, speed_overlay_dir)
-        output_path = output_dir / f"{image_path.stem}.png"
-        Image.fromarray(overlay).save(output_path)
-        return output_path
+        # If interleaver info exists, project back to ViT patch grid
+        grid_hw: Optional[Tuple[int, int]] = None
+        if interleaver:
+            patch_scores_list = self._project_interleaver_relevance(token_scores, interleaver)
+            if not patch_scores_list:
+                print(f"[WARN] Interleaver projection failed for {image_path.name}; falling back to token scores.")
+                patch_scores_list = [(token_scores, grid_hw)]
+        else:
+            patch_scores_list = [(token_scores, grid_hw)]
+
+        # If vision attentions exist, propagate through vision stack
+        outputs: List[Path] = []
+        vision_attn = {k: v for k, v in moved_attention.items() if "vision_attn" in k or "vision_block" in k}
+
+        for idx, (patch_scores, grid_hw_val) in enumerate(patch_scores_list):
+            vision_scores = patch_scores
+            if vision_attn and patch_scores is not None:
+                try:
+                    vision_scores = self._compute_vision_relevance(vision_attn, patch_scores)
+                except Exception as exc:
+                    print(f"[WARN] Vision relevance failed for {image_path.name} slice {idx}: {exc}")
+                    vision_scores = patch_scores
+
+            # Determine actual image size for alignment
+            img_arr = cv2.imread(str(image_path))
+            actual_size = (img_arr.shape[1], img_arr.shape[0]) if img_arr is not None else None
+
+            heatmap_source = vision_scores.clone().detach().to(self.device) if vision_scores is not None else token_scores
+            heatmap = self._scores_to_heatmap(heatmap_source, meta, grid_hw=grid_hw_val, target_size=actual_size)
+            
+            if raw_output_dir:
+                heatmap_uint8 = np.uint8(255 * heatmap)
+                raw_name = f"{image_path.stem}.png" if len(patch_scores_list) == 1 else f"{image_path.stem}_img{idx}.png"
+                raw_path = raw_output_dir / raw_name
+                Image.fromarray(heatmap_uint8).save(raw_path)
+
+            overlay_name = image_path.stem if len(patch_scores_list) == 1 else f"{image_path.stem}_img{idx}"
+            overlay = self._render_overlay(image_path, heatmap, overlay_name, route_overlay_dir, speed_overlay_dir)
+            output_path = output_dir / f"{overlay_name}.png"
+            Image.fromarray(overlay).save(output_path)
+            outputs.append(output_path)
+
+        return outputs[0] if outputs else output_dir / f"{image_path.stem}.png"
+
+    def _compute_vision_relevance(
+        self,
+        attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]],
+        init_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        """Propagate patch-level relevance through vision attention stack (with residual_alpha)."""
+        import re
+        vision_items = []
+        for name, entries in attention_maps.items():
+            if "vision_attn" in name or "vision_block" in name:
+                match = re.search(r"vision_(?:attn|block)_?(\d+)", name)
+                layer_idx = int(match.group(1)) if match else 0
+                vision_items.append((layer_idx, name, entries))
+        if not vision_items:
+            return init_scores
+        # Sort from last to first (top-down relevance)
+        vision_items.sort(key=lambda x: x[0], reverse=True)
+        relevance_vec = init_scores
+        for _, _, entries in vision_items:
+            attn_list = [e["attn"] for e in entries if e.get("attn") is not None]
+            grad_list = [e["grad"] for e in entries if e.get("grad") is not None]
+            if not attn_list or not grad_list:
+                continue
+            min_len = min(t.shape[-1] for t in attn_list)
+            attn_list = [t[..., :min_len, :min_len] for t in attn_list]
+            grad_list = [g[..., :min_len, :min_len] for g in grad_list]
+            attn = torch.stack(attn_list, dim=0).mean(dim=0)
+            grad = torch.stack(grad_list, dim=0).mean(dim=0)
+            cam = avg_heads(attn, grad)  # [S, S]
+            if self.cam_softmax:
+                cam = torch.softmax(cam / max(self.cam_temperature, 1e-6), dim=-1)
+            if relevance_vec.shape[-1] != cam.shape[-1]:
+                # Trim/pad relevance vector
+                target_len = cam.shape[-1]
+                if relevance_vec.shape[-1] > target_len:
+                    relevance_vec = relevance_vec[..., :target_len]
+                else:
+                    pad = torch.zeros(target_len - relevance_vec.shape[-1], device=relevance_vec.device, dtype=relevance_vec.dtype)
+                    relevance_vec = torch.cat([relevance_vec, pad], dim=-1)
+            relevance_vec = self.residual_alpha * relevance_vec + torch.matmul(cam, relevance_vec)
+        return relevance_vec
+
+    def _project_interleaver_relevance(
+        self,
+        token_scores: torch.Tensor,
+        interleaver: Dict[str, Any],
+    ) -> List[Tuple[torch.Tensor, Optional[Tuple[int, int]]]]:
+        """Project image-token relevance back to ViT patch grid using interleaver metadata and grads."""
+        # Move tensors to device
+        def _to_device(entry):
+            if entry is None:
+                return None
+            if isinstance(entry, dict) and "value" in entry:
+                return entry["value"].to(self.device)
+            if torch.is_tensor(entry):
+                return entry.to(self.device)
+            return entry
+
+        pixel_shuffle_out = _to_device(interleaver.get("pixel_shuffle_out"))
+        pixel_shuffle_grad = None
+        if isinstance(interleaver.get("pixel_shuffle_out"), dict):
+            pixel_shuffle_grad = _to_device(interleaver.get("pixel_shuffle_out").get("grad"))
+        tokens_per_patch = interleaver.get("tokens_per_patch")
+        num_patches_list = interleaver.get("num_patches_list")
+        selected_mask = _to_device(interleaver.get("selected_mask"))
+        mlp1_output_grad = None
+        if isinstance(interleaver.get("mlp1_output"), dict):
+            mlp1_output_grad = _to_device(interleaver.get("mlp1_output").get("grad"))
+            # Flatten batch dimension if present (e.g. [B, N, C] -> [B*N, C])
+            if mlp1_output_grad is not None and mlp1_output_grad.dim() == 3:
+                mlp1_output_grad = mlp1_output_grad.reshape(-1, mlp1_output_grad.shape[-1])
+        mlp1_weight = interleaver.get("mlp1_weight")
+        mlp1_bias = interleaver.get("mlp1_bias")
+
+        # If multiple images are present, split by selected_mask counts or num_patches_list.
+        image_offsets: List[int] = []
+        if selected_mask is not None and selected_mask.dim() == 2:
+            # selected_mask: [B, N]; count image tokens per image
+            image_token_counts = selected_mask.sum(dim=1).tolist()
+            prefix = 0
+            for cnt in image_token_counts:
+                image_offsets.append(prefix)
+                prefix += int(cnt)
+        elif num_patches_list:
+            # tokens_per_patch is needed to map patches->tokens
+            if tokens_per_patch and tokens_per_patch > 0:
+                prefix = 0
+                for p in num_patches_list:
+                    image_offsets.append(prefix)
+                    prefix += int(p) * int(tokens_per_patch)
+        else:
+            image_offsets = [0]
+
+        results: List[Tuple[torch.Tensor, Optional[Tuple[int, int]]]] = []
+        num_images = len(image_offsets)
+        for idx in range(num_images):
+            start = image_offsets[idx]
+            end = image_offsets[idx + 1] if idx + 1 < num_images else token_scores.numel()
+            scores = token_scores[start:end]
+
+            # If mlp1_output_grad and weight are available, backprop relevance to input space (Chefer-style)
+            if mlp1_output_grad is not None and mlp1_weight is not None and mlp1_output_grad.shape[0] >= end:
+                grad_slice = mlp1_output_grad[start:end]  # [T, D_out]
+                # grad_slice @ W -> [T, D_in]; use norm as scalar weight per token
+                try:
+                    grad_w = torch.matmul(grad_slice, mlp1_weight.to(self.device))
+                    token_weights = grad_w.norm(dim=-1)
+                    token_weights = token_weights / (token_weights.max() + 1e-6)
+                    if token_weights.numel() == scores.numel():
+                        scores = scores * token_weights
+                except Exception as exc:
+                    print(f"[WARN] mlp1 grad-based weighting failed: {exc}")
+            elif mlp1_output_grad is not None:
+                # Fallback: grad norm only
+                grad_slice = mlp1_output_grad[start:end]
+                grad_norm = grad_slice.norm(dim=-1)
+                if grad_norm.numel() == scores.numel():
+                    grad_norm = grad_norm / (grad_norm.max() + 1e-6)
+                    scores = scores * grad_norm
+
+            # Map tokens -> patches by averaging tokens_per_patch
+            if tokens_per_patch and tokens_per_patch > 0:
+                total_tokens = scores.numel()
+                num_patches = total_tokens // tokens_per_patch
+                if num_patches == 0:
+                    results.append((scores, None))
+                    continue
+                scores = scores[: num_patches * tokens_per_patch]
+                scores = scores.reshape(num_patches, tokens_per_patch).mean(dim=1)
+            else:
+                if tokens_per_patch is None:
+                    print(f"[WARN] tokens_per_patch missing; skipping token->patch aggregation for image {idx}")
+
+            grid_hw = None
+            if pixel_shuffle_out is not None:
+                # pixel_shuffle_out shape: [B, H, W, C]; pick corresponding image if available
+                img_idx = min(idx, pixel_shuffle_out.shape[0] - 1)
+                h, w = pixel_shuffle_out.shape[1], pixel_shuffle_out.shape[2]
+                grid_hw = (h, w)
+                expected_patches = h * w
+                if scores.numel() != expected_patches:
+                    print(
+                        f"[WARN] Image {idx}: patch relevance length ({scores.numel()}) != expected grid size ({expected_patches}); padding/trimming."
+                    )
+                    if scores.numel() < expected_patches:
+                        pad = torch.zeros(expected_patches - scores.numel(), device=scores.device, dtype=scores.dtype)
+                        scores = torch.cat([scores, pad], dim=0)
+                    else:
+                        scores = scores[:expected_patches]
+                # If pixel_shuffle grad exists, weight patch relevance
+                if pixel_shuffle_grad is not None:
+                    grad_img = pixel_shuffle_grad[img_idx]
+                    grad_norm = grad_img.norm(dim=-1).flatten()
+                    if grad_norm.numel() == scores.numel():
+                        grad_norm = grad_norm / (grad_norm.max() + 1e-6)
+                        scores = scores * grad_norm
+                    else:
+                        print(f"[WARN] pixel_shuffle grad size mismatch for image {idx}: {grad_norm.numel()} vs {scores.numel()}")
+
+            results.append((scores, grid_hw))
+
+        return results
 
     def _prepare_driving_input_with_prompt(
         self, image_path: Path
@@ -592,61 +790,46 @@ class GenericAttentionTextVisualizer:
             return None
         return payload
 
-    def _scores_to_heatmap(self, scores: torch.Tensor, meta: Dict[str, Any]) -> np.ndarray:
-        total_tokens = meta["num_total_image_tokens"]
+    def _scores_to_heatmap(
+        self,
+        scores: torch.Tensor,
+        meta: Dict[str, Any],
+        grid_hw: Optional[Tuple[int, int]] = None,
+        target_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        # Use actual token count (may be shorter than expected) and pad to a grid
+        total_tokens = int(scores.numel())
         orig_h = meta["original_height"]
         orig_w = meta["original_width"]
-        
-        # Attempt to find best H, W such that H*W = total_tokens and H/W ~ orig_h/orig_w
-        best_h, best_w = int(math.sqrt(total_tokens)), int(math.sqrt(total_tokens))
-        min_error = float("inf")
-        target_ratio = orig_w / orig_h
-        
-    @staticmethod
-    def _resolve_grid_size(n: int, h: int, w: int) -> Tuple[int, int]:
-        # Find factors of n that best match aspect ratio h/w
-        target_ratio = h / w
-        best_h, best_w = int(math.sqrt(n)), int(math.sqrt(n))
-        min_error = float("inf")
-        
-        for i in range(1, int(math.sqrt(n)) + 1):
-            if n % i == 0:
-                # Factor pair (i, n//i)
-                h1, w1 = i, n // i
-                ratio1 = h1 / w1
-                err1 = abs(ratio1 - target_ratio)
-                if err1 < min_error:
-                    min_error = err1
-                    best_h, best_w = h1, w1
-                
-                # Factor pair (n//i, i)
-                h2, w2 = n // i, i
-                ratio2 = h2 / w2
-                err2 = abs(ratio2 - target_ratio)
-                if err2 < min_error:
-                    min_error = err2
-                    best_h, best_w = h2, w2
-        return best_h, best_w
+        if target_size:
+            tgt_w, tgt_h = target_size
+            if (orig_w, orig_h) != (tgt_w, tgt_h):
+                print(
+                    f"[WARN] meta size ({orig_w}x{orig_h}) != actual image size ({tgt_w}x{tgt_h}); using actual size for final resize."
+                )
+                orig_w, orig_h = tgt_w, tgt_h
 
-    def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
-        # token_scores is [N_tokens]; reshape to grid close to image aspect, padding if needed
-        total_tokens = int(token_scores.numel())
-        H_orig = int(meta["original_height"])
-        W_orig = int(meta["original_width"])
+        if grid_hw is not None:
+            grid_h, grid_w = grid_hw
+            if grid_h * grid_w != total_tokens:
+                pad = torch.zeros(grid_h * grid_w - total_tokens, device=scores.device, dtype=scores.dtype)
+                scores = torch.cat([scores, pad], dim=0)
+        else:
+            # Approximate grid preserving aspect ratio, allowing padding if not divisible
+            target_ratio = orig_h / max(orig_w, 1)
+            grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
+            grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
+            if grid_h * grid_w < total_tokens:
+                grid_h = int(math.ceil(total_tokens / grid_w))
+            if grid_h * grid_w != total_tokens:
+                pad = torch.zeros(grid_h * grid_w - total_tokens, device=scores.device, dtype=scores.dtype)
+                scores = torch.cat([scores, pad], dim=0)
 
-        target_ratio = H_orig / max(W_orig, 1)
-        grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
-        grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
-        if grid_h * grid_w < total_tokens:
-            grid_h = int(math.ceil(total_tokens / grid_w))
-
-        if grid_h * grid_w != total_tokens:
-            pad = torch.zeros(grid_h * grid_w - total_tokens, device=token_scores.device, dtype=token_scores.dtype)
-            token_scores = torch.cat([token_scores, pad], dim=0)
-
-        heatmap = token_scores.view(grid_h, grid_w).detach().float().to("cpu").numpy()
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
-        heatmap = cv2.resize(heatmap, (W_orig, H_orig)) # cv2.resize uses (width, height)
+        heatmap = scores.reshape(grid_h, grid_w).detach().float().to("cpu").numpy()
+        # Normalization/clipping for better contrast
+        if heatmap.max() - heatmap.min() > 1e-9:
+            heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+        heatmap = cv2.resize(heatmap, (orig_w, orig_h))
         return heatmap
 
     def _render_overlay(

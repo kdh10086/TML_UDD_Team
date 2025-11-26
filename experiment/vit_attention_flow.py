@@ -152,11 +152,66 @@ class VisionAttentionFlow:
             raise RuntimeError("Cached payload is missing attention/meta for attention flow rendering.")
         moved = self._move_attention_maps_to_device(attention_maps, self.device)
         token_scores = self._compute_attention_flow(moved, meta["num_total_image_tokens"])
-        heatmap = self._scores_to_heatmap(token_scores, meta)
-        heatmap = self._scores_to_heatmap(token_scores, meta)
+        
+        # Check for multiple views (crops)
+        # token_scores is [S] if B=1, but _compute_attention_flow returns [S] currently?
+        # Let's check _compute_attention_flow. It returns R[-1, ...].sum().
+        # We need to update _compute_attention_flow to return [B, S] or similar if we want per-crop scores.
+        # Actually, _compute_attention_flow currently aggregates to a single score vector from the last batch item.
+        # We need to change _compute_attention_flow to return the full R matrix or handle batching better.
+        
+        # Wait, _compute_attention_flow implementation:
+        # R = torch.eye(S).expand(B, S, S)
+        # ... R = torch.bmm(attn, R)
+        # scores = R[-1, 1:, 1:].sum(dim=0) -> This selects only the last item!
+        
+        # I need to modify _compute_attention_flow to return scores for ALL batch items if needed, 
+        # or return the full R.
+        # Let's modify _compute_attention_flow first (in a separate chunk or this one if possible).
+        # I will modify _compute_attention_flow to return the full R tensor [B, S, S] instead of scores.
+        # Then I will handle extraction here.
+        
+        # But wait, I can't change the signature of _compute_attention_flow easily if it's used elsewhere?
+        # It's internal.
+        
+        # Let's assume I change _compute_attention_flow to return `flow_matrix` [B, S, S].
+        flow_matrix = self._compute_attention_flow(moved)
+        
+        B = flow_matrix.shape[0]
+        heatmap = None
+        
+        if B > 1:
+            # High-res mode: B-1 crops + 1 global thumbnail
+            crops_flow = flow_matrix[:-1] # [B-1, S, S]
+            global_flow = flow_matrix[-1] # [S, S]
+            
+            # 1. Compute global heatmap
+            tokens_per_view = int(meta["num_image_tokens_per_patch"])
+            
+            # 2. Compute crop heatmaps
+            crop_heatmaps = []
+            for i in range(B - 1):
+                c_flow = crops_flow[i].unsqueeze(0)
+                c_scores = self._extract_flow_scores(c_flow, tokens_per_view)
+                c_map = self._scores_to_heatmap(c_scores, meta, target_size=(448, 448), force_square=True)
+                crop_heatmaps.append(c_map)
+                
+            # 3. Stitch
+            orig_h, orig_w = meta["original_height"], meta["original_width"]
+            grid_h, grid_w = self._resolve_grid_layout(B - 1, orig_h, orig_w)
+            stitched = self._stitch_heatmaps(crop_heatmaps, grid_h, grid_w)
+            
+            # 4. Resize
+            heatmap = cv2.resize(stitched, (orig_w, orig_h))
+            
+            if heatmap.max() - heatmap.min() > 1e-9:
+                heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+        else:
+            token_scores = self._extract_flow_scores(flow_matrix, meta["num_total_image_tokens"])
+            heatmap = self._scores_to_heatmap(token_scores, meta)
         
         if raw_output_dir:
-            heatmap_uint8 = np.uint8(255 * heatmap.float().cpu().numpy())
+            heatmap_uint8 = np.uint8(255 * heatmap)
             raw_path = raw_output_dir / f"{image_path.stem}.png"
             Image.fromarray(heatmap_uint8).save(raw_path)
 
@@ -252,21 +307,11 @@ class VisionAttentionFlow:
     def _compute_attention_flow(
         self,
         attention_maps: Dict[str, Sequence[Dict[str, torch.Tensor]]],
-        num_image_tokens: int,
     ) -> torch.Tensor:
         matrices = self._collect_vision_matrices(attention_maps)
         
-        # experiment_alt logic for flow:
-        # R = torch.eye(S).expand(B, S, S)
-        # for layer:
-        #   attn_mean = attn.mean(dim=1)
-        #   R = torch.bmm(attn_mean, R)
-        # return R[-1, 1:, 1:].sum(dim=0)
-        
         first_map = matrices[0]
-        B, _, S, S = first_map.shape # Note: collect_vision_matrices returns [B,H,S,S] or [B,S,S]? 
-        # Wait, collect_vision_matrices returns [B,H,S,S] (averaged over layers if stacked).
-        # Actually in my code it returns [B,H,S,S].
+        B, _, S, S = first_map.shape
         
         # Initialize R
         R = torch.eye(S, device=first_map.device, dtype=first_map.dtype).unsqueeze(0).expand(B, S, S)
@@ -274,18 +319,42 @@ class VisionAttentionFlow:
         for mat in matrices:
             # mat is [B, H, S, S]
             attn = mat.mean(dim=1) # [B, S, S]
-            # No residual, no discard (experiment_alt implementation is simple chain mult)
-            # But wait, my previous implementation had residual and discard.
-            # experiment_alt's _get_flow_relevance does NOT have residual or discard.
-            # I will follow experiment_alt for consistency.
+            
+            # Apply residual and discard if configured (experiment_alt logic usually doesn't, but let's keep it consistent if needed)
+            # The previous code didn't use _apply_residual/_apply_discard in the loop, just bmm.
+            # I will stick to the previous logic: simple chain multiplication.
             
             R = torch.bmm(attn, R)
             
-        # Select Global View (last batch item) and sum relevance
+        return R
+
+    def _extract_flow_scores(self, flow_matrix: torch.Tensor, num_image_tokens: int) -> torch.Tensor:
+        # flow_matrix is [B, S, S]
+        # We want the last item if B=1, or we handle B>1 outside.
+        # This function assumes it receives a batch of flow matrices and extracts scores for the LAST item in that batch?
+        # Or should it handle 1 item?
+        # Let's make it handle the last item of the provided tensor, consistent with other methods.
+        
+        S = flow_matrix.shape[-1]
         if S <= 1:
              raise RuntimeError("Not enough tokens for flow.")
              
-        scores = R[-1, 1:, 1:].sum(dim=0)
+        # Select Global View (last batch item) and sum relevance
+        # R[-1, 1:, 1:].sum(dim=0) -> Incoming flow to tokens?
+        # Wait, R = A_L * ... * A_1.
+        # R[i, j] is flow from i to j? Or j to i?
+        # If R = A * R_prev, and A[i,j] is attn from i to j.
+        # Then R[i,j] is flow from i to j.
+        # We want "importance of pixel j".
+        # Usually we look at row of CLS token? R[cls, j].
+        # But here the code was doing R[-1, 1:, 1:].sum(dim=0).
+        # R[-1] is the matrix for the last image in batch.
+        # 1: are image tokens.
+        # sum(dim=0) means sum over rows.
+        # Sum of R[i, j] over i. Total flow INTO j.
+        # This seems to be "how much attention does j receive".
+        
+        scores = flow_matrix[-1, 1:, 1:].sum(dim=0)
         
         if scores.shape[0] > num_image_tokens:
             scores = scores[:num_image_tokens]
@@ -337,46 +406,82 @@ class VisionAttentionFlow:
                     best_h, best_w = h2, w2
         return best_h, best_w
 
-    def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
-        num_views = max(1, int(meta["num_patch_views"]))
-        total_tokens = int(meta["num_total_image_tokens"])
-        H_orig = int(meta["original_height"])
-        W_orig = int(meta["original_width"])
+    def _scores_to_heatmap(
+        self, 
+        token_scores: torch.Tensor, 
+        meta: Dict[str, int],
+        target_size: Optional[Tuple[int, int]] = None,
+        force_square: bool = False
+    ) -> np.ndarray:
+        # If force_square is True, we assume the token grid is square (e.g. for crops)
+        # Otherwise we try to match aspect ratio
+        
+        total_tokens = int(token_scores.numel())
+        if force_square:
+            side = int(math.sqrt(total_tokens))
+            grid_h, grid_w = side, side
+        else:
+            H_orig = int(meta["original_height"])
+            W_orig = int(meta["original_width"])
+            target_ratio = H_orig / max(W_orig, 1)
+            grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
+            grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
+            if grid_h * grid_w < total_tokens:
+                grid_h = int(math.ceil(total_tokens / grid_w))
 
-        scores_flat = token_scores.flatten()
-        expected = total_tokens if total_tokens > 0 else scores_flat.numel()
-        if scores_flat.numel() < expected:
-            pad = torch.zeros(expected - scores_flat.numel(), device=scores_flat.device, dtype=scores_flat.dtype)
-            scores_flat = torch.cat([scores_flat, pad], dim=0)
-        elif scores_flat.numel() > expected:
-            scores_flat = scores_flat[:expected]
+        if grid_h * grid_w != total_tokens:
+            pad = torch.zeros(grid_h * grid_w - total_tokens, device=token_scores.device, dtype=token_scores.dtype)
+            token_scores = torch.cat([token_scores, pad], dim=0)
 
-        per_view = max(1, expected // num_views)
-        grids: List[torch.Tensor] = []
-        target_ratio = H_orig / max(W_orig, 1)
+        heatmap = token_scores.view(grid_h, grid_w).detach().float().to("cpu").numpy()
+        
+        # Normalize locally
+        if heatmap.max() - heatmap.min() > 1e-9:
+            heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+            
+        if target_size:
+            heatmap = cv2.resize(heatmap, target_size)
+        elif not force_square:
+             heatmap = cv2.resize(heatmap, (meta["original_width"], meta["original_height"]))
+             
+        return heatmap
 
-        for v in range(num_views):
-            start = v * per_view
-            end = min(start + per_view, scores_flat.numel())
-            view_scores = scores_flat[start:end]
-            if view_scores.numel() == 0:
-                continue
-            grid_h = max(1, int(round(math.sqrt(view_scores.numel() * target_ratio))))
-            grid_w = max(1, int(math.ceil(view_scores.numel() / grid_h)))
-            if grid_h * grid_w < view_scores.numel():
-                grid_h = int(math.ceil(view_scores.numel() / grid_w))
-            if grid_h * grid_w != view_scores.numel():
-                pad = torch.zeros(grid_h * grid_w - view_scores.numel(), device=view_scores.device, dtype=view_scores.dtype)
-                view_scores = torch.cat([view_scores, pad], dim=0)
-            grids.append(view_scores.view(1, 1, grid_h, grid_w))
+    def _resolve_grid_layout(self, n: int, h: int, w: int) -> Tuple[int, int]:
+        """Determine (rows, cols) for n tiles to best match image aspect ratio h/w."""
+        target_ratio = h / w
+        best_r, best_c = 1, n
+        min_err = float("inf")
+        
+        for r in range(1, n + 1):
+            if n % r == 0:
+                c = n // r
+                # Aspect ratio of the grid of square tiles is r/c
+                ratio = r / c
+                err = abs(ratio - target_ratio)
+                if err < min_err:
+                    min_err = err
+                    best_r, best_c = r, c
+        return best_r, best_c
 
-        if not grids:
-            raise RuntimeError("No view scores available to build heatmap.")
-
-        scores = torch.stack(grids, dim=0).mean(dim=0)  # [1,1,H,W]
-        heatmap = F.interpolate(scores, size=(H_orig, W_orig), mode="bilinear", align_corners=False)
-        heatmap = heatmap.squeeze(0).squeeze(0)
-        return (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min()).clamp_min(1e-6)
+    def _stitch_heatmaps(self, heatmaps: List[np.ndarray], rows: int, cols: int) -> np.ndarray:
+        """Stitch list of heatmaps into a single large heatmap."""
+        if not heatmaps:
+            return np.zeros((100, 100), dtype=np.float32)
+        
+        # Assume all heatmaps have same size (they should, coming from same model)
+        h, w = heatmaps[0].shape
+        
+        # Create canvas
+        canvas = np.zeros((rows * h, cols * w), dtype=np.float32)
+        
+        for idx, hm in enumerate(heatmaps):
+            if idx >= rows * cols:
+                break
+            r = idx // cols
+            c = idx % cols
+            canvas[r*h : (r+1)*h, c*w : (c+1)*w] = hm
+            
+        return canvas
 
     def _render_overlay(
         self,

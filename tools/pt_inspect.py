@@ -82,6 +82,15 @@ def _is_simlingo_payload(payload) -> bool:
     )
 
 
+import re
+
+def _natural_keys(text: str):
+    """
+    Strings containing numbers are sorted naturally (1, 2, ... 10).
+    """
+    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
+
+
 def describe_simlingo_payload(payload) -> None:
     """Sim-Lingo 추론 저장 포맷에 맞춘 요약을 한국어로 출력."""
     print("## Sim-Lingo 추론 결과 요약 (단일 프레임 기준)")
@@ -186,18 +195,21 @@ def describe_simlingo_payload(payload) -> None:
 
     attention = payload.get("attention") or {}
     if attention:
-        print("- 어텐션 맵 상세")
-        for name in sorted(attention):
+        print("- 어텐션 맵 상세 (마지막 스텝만 표시)")
+        for name in sorted(attention, key=_natural_keys):
             stack = attention[name] or []
-            print(f"  · {name}: {len(stack)}개")
-            for idx, entry in enumerate(stack):
-                attn_tensor = entry.get("attn")
-                grad_tensor = entry.get("grad")
-                shape = entry.get("shape")
-                if shape is None and isinstance(attn_tensor, torch.Tensor):
-                    shape = tuple(attn_tensor.shape)
-                grad_info = "있음" if grad_tensor is not None else "없음"
-                print(f"    [{idx}] attn_shape={shape} grad={grad_info}")
+            if not stack:
+                print(f"  · {name}: 0개")
+                continue
+
+            entry = stack[-1]
+            attn_tensor = entry.get("attn")
+            grad_tensor = entry.get("grad")
+            shape = entry.get("shape")
+            if shape is None and isinstance(attn_tensor, torch.Tensor):
+                shape = tuple(attn_tensor.shape)
+            grad_info = "있음" if grad_tensor is not None else "없음"
+            print(f"  · {name} ({len(stack)}개): attn_shape={shape} grad={grad_info}")
 
     print("")  # spacer
 

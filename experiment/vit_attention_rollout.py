@@ -156,12 +156,46 @@ class VisionAttentionRollout:
             raise RuntimeError("Cached payload is missing attention/meta for rollout rendering.")
         moved = self._move_attention_maps_to_device(attention_maps, self.device)
         rollout = self._compute_rollout(moved)
-        token_scores = self._extract_image_scores(rollout, meta["num_total_image_tokens"])
-        heatmap = self._scores_to_heatmap(token_scores, meta)
-        heatmap = self._scores_to_heatmap(token_scores, meta)
+        
+        # Check for multiple views (crops)
+        B = rollout.shape[0]
+        heatmap = None
+        
+        if B > 1:
+            # High-res mode: B-1 crops + 1 global thumbnail
+            crops_rollout = rollout[:-1]  # [B-1, S, S]
+            global_rollout = rollout[-1]  # [S, S]
+            
+            # 1. Compute global heatmap for fallback/reference
+            # Note: num_total_image_tokens is for ALL patches.
+            tokens_per_view = int(meta["num_image_tokens_per_patch"])
+            
+            # 2. Compute crop heatmaps
+            crop_heatmaps = []
+            for i in range(B - 1):
+                c_rollout = crops_rollout[i].unsqueeze(0) # [1, S, S]
+                c_scores = self._extract_image_scores(c_rollout, tokens_per_view)
+                # Each crop is a square tile (e.g. 448x448)
+                c_map = self._scores_to_heatmap(c_scores, meta, target_size=(448, 448), force_square=True)
+                crop_heatmaps.append(c_map)
+                
+            # 3. Stitch
+            orig_h, orig_w = meta["original_height"], meta["original_width"]
+            grid_h, grid_w = self._resolve_grid_layout(B - 1, orig_h, orig_w)
+            stitched = self._stitch_heatmaps(crop_heatmaps, grid_h, grid_w)
+            
+            # 4. Resize stitched to original size
+            heatmap = cv2.resize(stitched, (orig_w, orig_h))
+            
+            # Normalize stitched
+            if heatmap.max() - heatmap.min() > 1e-9:
+                heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+        else:
+            token_scores = self._extract_image_scores(rollout, meta["num_total_image_tokens"])
+            heatmap = self._scores_to_heatmap(token_scores, meta)
         
         if raw_output_dir:
-            heatmap_uint8 = np.uint8(255 * heatmap.float().cpu().numpy())
+            heatmap_uint8 = np.uint8(255 * heatmap)
             raw_path = raw_output_dir / f"{image_path.stem}.png"
             Image.fromarray(heatmap_uint8).save(raw_path)
 
@@ -347,46 +381,82 @@ class VisionAttentionRollout:
                     best_h, best_w = h2, w2
         return best_h, best_w
 
-    def _scores_to_heatmap(self, token_scores: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
-        num_views = max(1, int(meta["num_patch_views"]))
-        total_tokens = int(meta["num_total_image_tokens"])
-        H_orig = int(meta["original_height"])
-        W_orig = int(meta["original_width"])
+    def _scores_to_heatmap(
+        self, 
+        token_scores: torch.Tensor, 
+        meta: Dict[str, int],
+        target_size: Optional[Tuple[int, int]] = None,
+        force_square: bool = False
+    ) -> np.ndarray:
+        # If force_square is True, we assume the token grid is square (e.g. for crops)
+        # Otherwise we try to match aspect ratio
+        
+        total_tokens = int(token_scores.numel())
+        if force_square:
+            side = int(math.sqrt(total_tokens))
+            grid_h, grid_w = side, side
+        else:
+            H_orig = int(meta["original_height"])
+            W_orig = int(meta["original_width"])
+            target_ratio = H_orig / max(W_orig, 1)
+            grid_h = max(1, int(round(math.sqrt(total_tokens * target_ratio))))
+            grid_w = max(1, int(math.ceil(total_tokens / grid_h)))
+            if grid_h * grid_w < total_tokens:
+                grid_h = int(math.ceil(total_tokens / grid_w))
 
-        scores_flat = token_scores.flatten()
-        expected = total_tokens if total_tokens > 0 else scores_flat.numel()
-        if scores_flat.numel() < expected:
-            pad = torch.zeros(expected - scores_flat.numel(), device=scores_flat.device, dtype=scores_flat.dtype)
-            scores_flat = torch.cat([scores_flat, pad], dim=0)
-        elif scores_flat.numel() > expected:
-            scores_flat = scores_flat[:expected]
+        if grid_h * grid_w != total_tokens:
+            pad = torch.zeros(grid_h * grid_w - total_tokens, device=token_scores.device, dtype=token_scores.dtype)
+            token_scores = torch.cat([token_scores, pad], dim=0)
 
-        per_view = max(1, expected // num_views)
-        grids: List[torch.Tensor] = []
-        target_ratio = H_orig / max(W_orig, 1)
+        heatmap = token_scores.view(grid_h, grid_w).detach().float().to("cpu").numpy()
+        
+        # Normalize locally
+        if heatmap.max() - heatmap.min() > 1e-9:
+            heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+            
+        if target_size:
+            heatmap = cv2.resize(heatmap, target_size)
+        elif not force_square:
+             heatmap = cv2.resize(heatmap, (meta["original_width"], meta["original_height"]))
+             
+        return heatmap
 
-        for v in range(num_views):
-            start = v * per_view
-            end = min(start + per_view, scores_flat.numel())
-            view_scores = scores_flat[start:end]
-            if view_scores.numel() == 0:
-                continue
-            grid_h = max(1, int(round(math.sqrt(view_scores.numel() * target_ratio))))
-            grid_w = max(1, int(math.ceil(view_scores.numel() / grid_h)))
-            if grid_h * grid_w < view_scores.numel():
-                grid_h = int(math.ceil(view_scores.numel() / grid_w))
-            if grid_h * grid_w != view_scores.numel():
-                pad = torch.zeros(grid_h * grid_w - view_scores.numel(), device=view_scores.device, dtype=view_scores.dtype)
-                view_scores = torch.cat([view_scores, pad], dim=0)
-            grids.append(view_scores.view(1, 1, grid_h, grid_w))
+    def _resolve_grid_layout(self, n: int, h: int, w: int) -> Tuple[int, int]:
+        """Determine (rows, cols) for n tiles to best match image aspect ratio h/w."""
+        target_ratio = h / w
+        best_r, best_c = 1, n
+        min_err = float("inf")
+        
+        for r in range(1, n + 1):
+            if n % r == 0:
+                c = n // r
+                # Aspect ratio of the grid of square tiles is r/c
+                ratio = r / c
+                err = abs(ratio - target_ratio)
+                if err < min_err:
+                    min_err = err
+                    best_r, best_c = r, c
+        return best_r, best_c
 
-        if not grids:
-            raise RuntimeError("No view scores available to build heatmap.")
-
-        scores = torch.stack(grids, dim=0).mean(dim=0)  # [1,1,H,W]
-        heatmap = F.interpolate(scores, size=(H_orig, W_orig), mode="bilinear", align_corners=False)
-        heatmap = heatmap.squeeze(0).squeeze(0)
-        return (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min()).clamp_min(1e-6)
+    def _stitch_heatmaps(self, heatmaps: List[np.ndarray], rows: int, cols: int) -> np.ndarray:
+        """Stitch list of heatmaps into a single large heatmap."""
+        if not heatmaps:
+            return np.zeros((100, 100), dtype=np.float32)
+        
+        # Assume all heatmaps have same size (they should, coming from same model)
+        h, w = heatmaps[0].shape
+        
+        # Create canvas
+        canvas = np.zeros((rows * h, cols * w), dtype=np.float32)
+        
+        for idx, hm in enumerate(heatmaps):
+            if idx >= rows * cols:
+                break
+            r = idx // cols
+            c = idx % cols
+            canvas[r*h : (r+1)*h, c*w : (c+1)*w] = hm
+            
+        return canvas
 
     def _render_overlay(
         self,

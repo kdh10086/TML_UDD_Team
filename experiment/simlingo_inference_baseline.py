@@ -619,7 +619,7 @@ class SimLingoInferenceBaseline:
         )
         self.model = self._build_model()
         # 최종 forward의 어텐션/grad만 유지 (레이어/헤드별)
-        self.recorder = AttentionRecorder(keep_last_only=False)
+        self.recorder = AttentionRecorder(keep_last_only=True)
         self._register_attention_hooks()
         self._speed_cache: Dict[str, Dict[str, float]] = {}
 
